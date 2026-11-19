@@ -6,5 +6,6 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const src = new URL('../src/run-bin.ts', import.meta.url);
-const fromSource = existsSync(fileURLToPath(src)) && !fileURLToPath(src).includes('/node_modules/');
+// Checked on the URL: its separator is `/` on Windows too.
+const fromSource = existsSync(fileURLToPath(src)) && !src.href.includes('/node_modules/');
 await import((fromSource ? src : new URL('../dist/run-bin.js', import.meta.url)).href);

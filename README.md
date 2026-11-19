@@ -37,7 +37,9 @@ cpu-slots-node --test "test/**/*.test.ts"
 
 In a checkout or a clone (`src/` beside them) both commands run the TypeScript source as is — Node 22.18+
 strips the types — so a clone with no build has them (a tool rolled out by claude-ui is such a clone); a
-published install runs `dist/`.
+published install runs `dist/`. A checkout therefore needs Node 22.18 or later with type stripping on: not
+with `--no-experimental-strip-types` (in `NODE_OPTIONS`, or among `cpu-slots-node`'s arguments), even
+with `dist/` built.
 
 `cpu-slots-node` is `node --import <cpu-slots/register by absolute URL>`. Not `--import cpu-slots/register`
 by name: a test that forks a node child with a cwd of its own hands it the same `--import`, and the name
