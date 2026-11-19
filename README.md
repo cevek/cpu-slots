@@ -37,7 +37,8 @@ cpu-slots-node --test "test/**/*.test.ts"
 
 `cpu-slots-node` is `node --import <cpu-slots/register by absolute URL>`. Not `--import cpu-slots/register`
 by name: a test that forks a node child with a cwd of its own hands it the same `--import`, and the name
-resolved from there is a module not found.
+resolved from there is a module not found. Signals and the process group are as for `cpu-slots-run`
+(below).
 
 On Node 22 a file's `--test-timeout` starts before its process does, so it counts the wait for a slot:
 there, set timeouts on the tests (`test(name, { timeout }, fn)`) rather than on the command line. Node 24
@@ -72,11 +73,18 @@ hands their number to the command: every `@slots@` in its arguments, and `CPU_SL
 argument would be gone before the wrapper sees it. The width is fixed at the start — one that started
 on a busy machine stays narrow.
 
-The command runs in a process group of its own, a signal to the wrapper reaches the whole group, its
-exit code passes through, and its slots are held until it ends; what it leaves running in its group
-goes with it. The group is a session of its own, with no terminal: not for commands that prompt.
-Inside another holder's tree (a wrapper under a wrapper) the command stays in the outer one's group,
-so cancelling the outer one takes it too.
+The command runs in the wrapper's process group, with its terminal: its exit code passes through, and
+its slots are held until it ends. A kill of the caller's group (an agent tool's timeout,
+`kill -- -pgid`, a SIGKILL included) takes the command with the wrapper.
+
+- **SIGTERM, SIGHUP** to the wrapper go to the command's whole tree (on Linux; elsewhere to the command
+  alone). Sent to the whole group, a process gets two.
+- **SIGINT** is not passed on: Ctrl-C reaches the whole foreground group anyway, and a second one is a
+  forced exit with no cleanup to vitest and npm. A SIGINT to the wrapper's pid alone does not reach
+  the command.
+- **A cancel is total** (Linux): on any of the three the wrapper notes the command's tree, and what of it
+  still runs when the command exits gets SIGKILL — a nested wrapper's command, one that ignores
+  SIGTERM. A command that exits with no signal leaves what it started running.
 
 - **Width without a slot**: inside an ancestor's slot of the pool it takes none and the width is 1 (the
   ancestor holds one slot for its whole tree); with no pool (not Linux, `CPU_SLOTS=0`) or past the
@@ -162,7 +170,8 @@ process and nothing is held.
 - **One network namespace**: abstract names live in a network namespace. Processes of one namespace
   share the pool; a container has its own.
 - **Escaped descendants**: a holder's descendant that left its process group and outlives it runs on
-  without a slot.
+  without a slot; so does what a `cpu-slots-run` / `cpu-slots-node` command leaves running when it
+  exits with no signal to the wrapper.
 
 ## API
 

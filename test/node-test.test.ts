@@ -92,3 +92,20 @@ it.runIf(linux)('a signal to `cpu-slots-node` reaches the test files: the slot o
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
+
+it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test files: the slot one held goes free", async () => {
+  const f = fixtures('nt-group-kill', {
+    'a.test.mjs': `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\ntest('a', async () => {\n  appendFileSync(JOURNAL, 'start a\\n');\n  await new Promise((r) => setTimeout(r, 60_000));\n});\n`,
+  });
+  try {
+    const env = poolEnv('nt-group-kill', 1);
+    const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
+    expect(await lineIn(f.journal, 'start a')).toBe(true);
+    const next = holder(env);
+    // `start` makes the wrapper a group leader: an agent tool's timeout kills its group like this.
+    process.kill(-wrapper.pid, 'SIGKILL');
+    expect(await within(next.held, 10_000)).toBe(true);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});

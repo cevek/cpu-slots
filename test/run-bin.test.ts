@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { afterEach, expect, it } from 'vitest';
-import { ABSENT_MS, hasLine, holder, killAll, lineIn, linux, pause, poolEnv, repo, run, start, within } from './support/procs.ts';
+import { killSurvivors, subtree } from '../src/group.ts';
+import { ABSENT_MS, hasLine, holder, killAll, lineIn, linux, pause, poolEnv, repo, run, start, track, within } from './support/procs.ts';
 
 afterEach(killAll);
 
@@ -67,8 +69,9 @@ it.runIf(linux)("a wrapper inside another's command, in a pool of one: it takes 
 it.runIf(linux)('cancelling the outer of two nested wrappers takes the inner one\'s command too', async () => {
   const s = scratch('run-nested-cancel');
   try {
-    // The inner command shrugs SIGTERM off: only a group kill ends it. In a group of its own it would
-    // run on, its outer holder's slot gone.
+    // The inner command shrugs SIGTERM off: only the SIGKILL to the tree noted at the signal ends it.
+    // Once sh is gone the inner wrapper is no longer under the outer one's command: a walk of the tree
+    // at the command's exit would miss it.
     const innerCmd = `process.on('SIGTERM', () => {}); require('fs').writeFileSync(${JSON.stringify(s.journal)}, String(process.pid)); setInterval(() => {}, 1000);`;
     // `; exit $?` keeps sh the parent (dash would exec the last command): SIGTERM ends sh, and the
     // outer wrapper's command is gone.
@@ -88,7 +91,7 @@ it.runIf(linux)('cancelling the outer of two nested wrappers takes the inner one
   }
 });
 
-it.runIf(linux)("a signal to the wrapper reaches the command's whole group, not its leader alone", async () => {
+it.runIf(linux)("a signal to the wrapper reaches the command's whole tree, not its leader alone", async () => {
   const s = scratch('run-signal');
   try {
     // The leader ignores SIGHUP; its child says it got one, and only then do both end.
@@ -104,19 +107,50 @@ it.runIf(linux)("a signal to the wrapper reaches the command's whole group, not 
   }
 });
 
-it.runIf(linux)('what the command leaves running in its group goes with it', async () => {
-  const s = scratch('run-leftover');
+it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to the wrapper cannot be passed on", async () => {
+  const s = scratch('run-group-kill');
   try {
-    // The command starts a child in its own group, says its pid, and exits at once.
-    const r = await run([RUN, '--', process.execPath, '-e', `const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); require('fs').writeFileSync(${JSON.stringify(s.journal)}, String(c.pid)); c.unref();`], poolEnv('run-leftover', 2));
-    expect(r.code, r.out).toBe(0);
-    const pid = Number(readFileSync(s.journal, 'utf8'));
-    // The kill is a signal, the exit follows it.
+    const cmd = start([RUN, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(s.journal)}, String(process.pid)); setInterval(() => {}, 1000);`], poolEnv('run-group-kill', 2));
+    let pid = 0;
+    for (let i = 0; i < 600 && !pid; i++) {
+      pid = existsSync(s.journal) ? Number(readFileSync(s.journal, 'utf8')) : 0;
+      if (!pid) await pause(50);
+    }
+    expect(pid).toBeGreaterThan(0);
+    // `start` makes the wrapper a group leader: its group is the caller's group here.
+    process.kill(-cmd.pid, 'SIGKILL');
     for (let i = 0; i < 40 && isAlive(pid); i++) await pause(50);
     expect(isAlive(pid)).toBe(false);
   } finally {
     rmSync(s.dir, { recursive: true, force: true });
   }
+});
+
+it.runIf(linux)("Ctrl-C reaches the command once: the terminal's SIGINT to the group is not passed on again", async () => {
+  const s = scratch('run-sigint');
+  try {
+    // Counts its SIGINTs and exits a while after the first, time enough for a second to come.
+    const cmd = start([RUN, '--', process.execPath, '-e', `const fs = require('fs'); process.on('SIGINT', () => { fs.appendFileSync(${JSON.stringify(s.journal)}, 'SIGINT\\n'); setTimeout(() => process.exit(0), 500); }); fs.appendFileSync(${JSON.stringify(s.journal)}, 'up\\n'); setInterval(() => {}, 1000);`], poolEnv('run-sigint', 2));
+    expect(await lineIn(s.journal, 'up')).toBe(true);
+    process.kill(-cmd.pid, 'SIGINT');
+    expect((await cmd.done).code).toBe(0);
+    expect(readFileSync(s.journal, 'utf8').split('\n').filter((l) => l === 'SIGINT')).toHaveLength(1);
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+it.runIf(linux)('a noted process gets SIGKILL only under the start time it was noted with: a reused pid is not it', async () => {
+  const other = track(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true }));
+  const pid = other.pid!;
+  const [noted] = subtree(pid);
+  expect(noted?.pid).toBe(pid);
+  killSurvivors([{ pid, start: String(BigInt(noted!.start) + 1n) }]);
+  await pause(ABSENT_MS);
+  expect(isAlive(pid)).toBe(true);
+  killSurvivors([noted!]);
+  for (let i = 0; i < 40 && isAlive(pid); i++) await pause(50);
+  expect(isAlive(pid)).toBe(false);
 });
 
 it.runIf(linux)('waits for its first slot: nothing runs while the pool is full', async () => {
