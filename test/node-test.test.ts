@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { tryAcquireSlot } from '../src/index.ts';
-import { gone, hasLine, holder, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
+import { gone, hasLine, holder, pause, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
 
 
 afterEach(killAll);
@@ -132,8 +132,13 @@ it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test file
     // `start` makes the wrapper a group leader: an agent tool's timeout kills its group like this.
     process.kill(-wrapper.pid, 'SIGKILL');
     expect(await gone(pid)).toBe(true);
-    // Free now, to this process: the pool is on, and the file's death let its slot go.
-    const freed = await tryAcquireSlot(env);
+    // Free to this process: the pool is on, and the file's death let its slot go. Polled: the leader
+    // thread shows dead before the other threads are, and the slot goes with the last of them.
+    let freed = await tryAcquireSlot(env);
+    for (let i = 0; i < 200 && !freed; i++) {
+      await pause(50);
+      freed = await tryAcquireSlot(env);
+    }
     freed?.release();
     expect(freed).not.toBeNull();
   } finally {
