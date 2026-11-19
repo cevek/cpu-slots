@@ -83,7 +83,7 @@ export async function run(args: string[], env: NodeJS.ProcessEnv, cwd = repo, ms
   // `close`, not `exit`: the output is whole only once both streams have ended.
   const ended = new Promise<number | null>((r) => child.once('close', (code) => r(code)));
   const done = await within(ended, ms);
-  return { code: done ? child.exitCode : null, out, pid: child.pid };
+  return { code: done ? child.exitCode : null, out };
 }
 
 /** Starts a command like `run` and hands back its pid at once, the outcome as a promise. */
