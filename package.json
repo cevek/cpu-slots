@@ -1,6 +1,6 @@
 {
   "name": "cpu-slots",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Machine-wide CPU slots for test runners: each test file waits for a slot before its clock starts, so several suites at once queue instead of timing out. Linux; a no-op elsewhere.",
   "type": "module",
   "types": "./dist/index.d.ts",
