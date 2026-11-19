@@ -80,10 +80,15 @@ it.runIf(linux && nodeMajor >= 24)('`--test-timeout` does not count the wait for
 const waits = `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\nprocess.on('SIGHUP', () => { appendFileSync(JOURNAL, 'got SIGHUP\\n'); process.exit(1); });\ntest('a', async () => {\n  appendFileSync(JOURNAL, 'pid file ' + process.pid + '\\n');\n  await new Promise((r) => setTimeout(r, 60_000));\n});\n`;
 
 it.runIf(linux)('a signal to `cpu-slots-node` reaches the test files: the slot one held goes free', async () => {
-  const f = fixtures('nt-signal', { 'a.test.mjs': waits });
+  const f = fixtures('nt-signal', {
+    'a.test.mjs': waits,
+    // The runner shrugs SIGHUP off and waits for its file: dead first, it would have the wrapper
+    // SIGKILL the file before the file's handler says a word.
+    'runner.mjs': `if (!process.env.NODE_TEST_CONTEXT) process.on('SIGHUP', () => {});\n`,
+  });
   try {
     const env = poolEnv('nt-signal', 1);
-    const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
+    const wrapper = start([BIN, '--import', join(f.dir, 'runner.mjs'), '--test', join(f.dir, 'a.test.mjs')], env);
     expect(await pidOf(f.journal, 'file')).toBeGreaterThan(0);
     const next = holder(env);
     process.kill(wrapper.pid, 'SIGHUP');

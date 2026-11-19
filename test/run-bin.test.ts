@@ -166,6 +166,39 @@ it('a SIGINT to the wrapper alone, with no terminal, reaches the command once', 
   }
 });
 
+it.runIf(linux)('a SIGINT to the outer of two nested wrappers reaches the command once: below the inner one, the inner one passes it on', async () => {
+  const s = scratch('run-nested-sigint');
+  try {
+    const cmd = start([RUN, '--', process.execPath, RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGINT')], poolEnv('run-nested-sigint', 2));
+    const pid = await pidOf(s.journal, 'command');
+    expect(pid).toBeGreaterThan(0);
+    process.kill(cmd.pid, 'SIGINT');
+    expect((await cmd.done).code).toBe(0);
+    expect(count(s.journal, 'SIGINT')).toBe(1);
+  } finally {
+    killPids(s.journal);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+it.runIf(linux)('a command that dies of a signal not from the wrapper takes the tree noted before: a group Ctrl-C may end it first', async () => {
+  const s = scratch('run-died');
+  try {
+    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); say('pid child ' + c.pid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-died', 2));
+    const pid = await pidOf(s.journal, 'command');
+    const kid = await pidOf(s.journal, 'child');
+    expect(pid * kid).toBeGreaterThan(0);
+    // Past the wrapper's note of every second; the wrapper itself gets no signal.
+    await pause(1_500);
+    process.kill(pid, 'SIGKILL');
+    expect((await cmd.done).code).toBe(137);
+    expect(await gone(kid)).toBe(true);
+  } finally {
+    killPids(s.journal);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
 const hasScript = linux && spawnSync('script', ['--version']).status === 0;
 
 it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the command once: the wrapper does not pass it on", async () => {
@@ -175,7 +208,9 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     const file = join(s.dir, 'command.cjs');
     writeFileSync(file, counts(s.journal, 'SIGINT'));
     // `script` runs the line in a session of its own on a pty, in the pty's foreground group.
-    const term = track(spawn('script', ['-qec', [process.execPath, RUN, '--', process.execPath, file].map(q).join(' '), '/dev/null'], { env: poolEnv('run-ctrl-c', 2), stdio: 'pipe', detached: true }));
+    // The wrapper's stdin is not the terminal: only the foreground check tells it Ctrl-C has come.
+    const line = `${[process.execPath, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
+    const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv('run-ctrl-c', 2), stdio: 'pipe', detached: true }));
     const pid = await pidOf(s.journal, 'command');
     expect(pid).toBeGreaterThan(0);
     const f = readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '').split(' ');
@@ -198,6 +233,10 @@ it.runIf(linux)('a noted process gets a signal only under the start time it was 
   const pid = other.pid!;
   const noted = proc(pid);
   expect(noted?.pid).toBe(pid);
+  // The start time is a time: a process started later has a later one (clock ticks are 10 ms or less).
+  await pause(100);
+  const later = track(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true }));
+  expect(BigInt(proc(later.pid!)!.start)).toBeGreaterThan(BigInt(noted!.start));
   signalLive([{ pid, start: String(BigInt(noted!.start) + 1n) }], 'SIGKILL');
   await pause(ABSENT_MS);
   expect(isAlive(pid)).toBe(true);
