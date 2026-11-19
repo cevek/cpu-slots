@@ -78,23 +78,26 @@ it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to th
 
 // Says each SIGINT it gets; on SIGTERM says so and exits.
 const COUNTS = (journal: string) =>
-  `${sayTo(journal)} process.on('SIGINT', () => say('SIGINT')); process.on('SIGTERM', () => { say('SIGTERM'); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
+  `${sayTo(journal)} process.on('SIGINT', () => say('SIGINT')); for (const s of ['SIGTERM', 'SIGHUP']) process.on(s, () => { say(s); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
+const signalsIn = (journal: string) => readFileSync(journal, 'utf8').split('\n').filter((l) => l.startsWith('SIG'));
 
 const SPY = join(repo, 'test', 'support', 'kill-spy.mjs');
 
-it('a SIGTERM to the wrapper reaches the command', async () => {
-  const s = scratch('run-sigterm');
-  try {
-    const cmd = start([RUN, '--', process.execPath, '-e', COUNTS(s.journal)], poolEnv('run-sigterm', 0));
-    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
-    process.kill(cmd.pid, 'SIGTERM');
-    expect((await cmd.done).code).toBe(0);
-    expect(count(s.journal, 'SIGTERM')).toBe(1);
-  } finally {
-    killPids(s.journal);
-    rmSync(s.dir, { recursive: true, force: true });
-  }
-});
+for (const sig of ['SIGTERM', 'SIGHUP'] as const) {
+  it(`a ${sig} to the wrapper reaches the command as itself`, async () => {
+    const s = scratch(`run-${sig}`);
+    try {
+      const cmd = start([RUN, '--', process.execPath, '-e', COUNTS(s.journal)], poolEnv(`run-${sig}`, 0));
+      expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
+      process.kill(cmd.pid, sig);
+      expect((await cmd.done).code).toBe(0);
+      expect(signalsIn(s.journal)).toEqual([sig]);
+    } finally {
+      killPids(s.journal);
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+}
 
 it('a SIGINT to the wrapper alone, with no terminal, reaches the command once', async () => {
   const s = scratch('run-sigint');
@@ -119,23 +122,34 @@ it('a SIGINT to the wrapper alone, with no terminal, reaches the command once', 
 
 const hasScript = linux && spawnSync('script', ['--version']).status === 0;
 
+/**
+ * The wrapper, spied on, under `script`: in a session of its own on a pty, with that pty as its
+ * terminal; its stdin is not the terminal, so only the foreground check can tell where it is. In the
+ * pty's foreground group, or with `background` a job of its own in a job-controlling sh.
+ */
+async function onPty(s: { dir: string; journal: string }, background: boolean) {
+  // `.cjs`: the package is ESM, and the command uses `require`.
+  const file = join(s.dir, 'command.cjs');
+  writeFileSync(file, COUNTS(s.journal));
+  const spied = join(s.dir, 'spy');
+  const wrapped = `${[process.execPath, '--import', SPY, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
+  const line = background ? `/bin/sh -c ${q(`set -m; ${wrapped} & wait`)}` : wrapped;
+  const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv(`pty-${background}`, 2, { KILL_SPY: spied }), stdio: 'pipe', detached: true }));
+  const pid = await pidOf(s.journal, 'command');
+  expect(pid).toBeGreaterThan(0);
+  const f = readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '').split(' ');
+  const [wrapper, pgrp, tty, tpgid] = [Number(f[1]), Number(f[2]), Number(f[4]), Number(f[5])];
+  expect(tty).not.toBe(0);
+  if (background) expect(tpgid).not.toBe(pgrp);
+  else expect(tpgid).toBe(pgrp);
+  const sent = () => readFileSync(spied, 'utf8').split('\n').filter((l) => l === `kill ${pid} SIGINT`).length;
+  return { pid, wrapper, spied, term, sent };
+}
+
 it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the command once: the wrapper does not pass it on", async () => {
   const s = scratch('run-ctrl-c');
   try {
-    // `.cjs`: the package is ESM, and the command uses `require`.
-    const file = join(s.dir, 'command.cjs');
-    writeFileSync(file, COUNTS(s.journal));
-    // `script` runs the line in a session of its own on a pty, in the pty's foreground group.
-    // The wrapper's stdin is not the terminal: only the foreground check tells it Ctrl-C has come.
-    const spied = join(s.dir, 'spy');
-    const line = `${[process.execPath, '--import', SPY, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
-    const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv('run-ctrl-c', 2, { KILL_SPY: spied }), stdio: 'pipe', detached: true }));
-    const pid = await pidOf(s.journal, 'command');
-    expect(pid).toBeGreaterThan(0);
-    const f = readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '').split(' ');
-    const [wrapper, pgrp, tty, tpgid] = [Number(f[1]), Number(f[2]), Number(f[4]), Number(f[5])];
-    expect(tty).not.toBe(0);
-    expect(tpgid).toBe(pgrp);
+    const { pid, wrapper, spied, term, sent } = await onPty(s, false);
     // Ctrl-C sends SIGINT to every process of the group; here one at a time: the command, handled,
     // then the wrapper.
     process.kill(pid, 'SIGINT');
@@ -143,10 +157,27 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     process.kill(wrapper, 'SIGINT');
     // The wrapper's handlers have run; what they sent is in the spy's journal before this line.
     expect(await lineIn(spied, 'SIGINT handled 2', 10_000)).toBe(true);
-    expect(readFileSync(spied, 'utf8').split('\n')).not.toContain(`kill ${pid} SIGINT`);
+    expect(sent()).toBe(0);
     process.kill(wrapper, 'SIGTERM');
     expect(await gone(pid)).toBe(true);
     expect(count(s.journal, 'SIGINT')).toBe(1);
+    term.stdin!.end();
+  } finally {
+    killPids(s.journal);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+it.runIf(hasScript)('a SIGINT to a wrapper in the background of its terminal reaches the command once: a terminal is not the foreground', async () => {
+  const s = scratch('run-bg-sigint');
+  try {
+    const { pid, wrapper, spied, term, sent } = await onPty(s, true);
+    process.kill(wrapper, 'SIGINT');
+    expect(await lineIn(spied, 'SIGINT handled 2', 10_000)).toBe(true);
+    expect(sent()).toBe(1);
+    expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
+    process.kill(wrapper, 'SIGTERM');
+    expect(await gone(pid)).toBe(true);
     term.stdin!.end();
   } finally {
     killPids(s.journal);

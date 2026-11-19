@@ -86,8 +86,9 @@ its slots are held until it ends.
   dies of a SIGHUP and leaves them running. Sent to the
   whole group, a signal may reach the command twice: from the sender, and from the wrapper unless the
   command has exited by then.
-- **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
-  Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
+- **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (where
+  `/proc/self/stat` cannot be read — not Linux, a chroot without `/proc` — while its stdin is a
+  terminal): Ctrl-C has reached every process of it, and a second one is a
   forced exit with no cleanup to vitest and npm. A Ctrl-C that comes while the wrapper is starting
   the command, before it runs, does not reach the command.
 - **Limits**: a command that ignores the signal keeps the wrapper and its slots until it exits. What a
