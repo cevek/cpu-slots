@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, expect, it } from 'vitest';
@@ -132,8 +132,10 @@ async function onPty(s: { dir: string; journal: string }, background: boolean) {
   const file = join(s.dir, 'command.cjs');
   writeFileSync(file, COUNTS(s.journal));
   const spied = join(s.dir, 'spy');
-  const wrapped = `${[process.execPath, '--import', SPY, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
-  const line = background ? `/bin/sh -c ${q(`set -m; ${wrapped} & wait`)}` : wrapped;
+  const wrapped = [process.execPath, '--import', SPY, RUN, '--', process.execPath, file].map(q).join(' ');
+  // In the foreground its stdin is not the terminal, in the background it is: either way only the
+  // foreground check tells where it is, not stdin.
+  const line = background ? `/bin/sh -c ${q(`set -m; ${wrapped} & wait`)}` : `${wrapped} < /dev/null`;
   const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv(`pty-${background}`, 2, { KILL_SPY: spied }), stdio: 'pipe', detached: true }));
   const pid = await pidOf(s.journal, 'command');
   expect(pid).toBeGreaterThan(0);
@@ -142,6 +144,7 @@ async function onPty(s: { dir: string; journal: string }, background: boolean) {
   expect(tty).not.toBe(0);
   if (background) expect(tpgid).not.toBe(pgrp);
   else expect(tpgid).toBe(pgrp);
+  expect(readlinkSync(`/proc/${wrapper}/fd/0`).startsWith('/dev/pts/')).toBe(background);
   const sent = () => readFileSync(spied, 'utf8').split('\n').filter((l) => l === `kill ${pid} SIGINT`).length;
   return { pid, wrapper, spied, term, sent };
 }

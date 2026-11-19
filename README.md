@@ -76,23 +76,25 @@ on a busy machine stays narrow.
 The command runs in the wrapper's process group, with its terminal: its exit code passes through, and
 its slots are held until it ends.
 
-- **A kill of the caller's group** (an agent tool's timeout, `kill -- -pgid`) or of its cgroup takes
-  the wrapper, the command and all it runs that stayed in the group. A `kill -9` to the wrapper's pid
-  alone cannot be passed on and leaves the command running: it is in the caller's group, and the kill
-  of that group takes it.
+- **A SIGKILL to the wrapper's group** (`kill -KILL -- -pgid`, an agent tool's timeout) or a kill of
+  its cgroup takes the wrapper, the command and all it runs that stayed in the group. That group is
+  the caller's, or under a job-controlling shell the job's. A `kill -9` to the wrapper's pid alone
+  cannot be passed on and leaves the command running; the kill of the group takes it.
 - **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone; what becomes of its children is
   the command's, as with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to its command as SIGTERM —
   to any, not only `node --test`, the reason for it: the runner ends its test files on SIGTERM, but
-  dies of a SIGHUP and leaves them running. Sent to the
-  whole group, a signal may reach the command twice: from the sender, and from the wrapper unless the
-  command has exited by then.
+  dies of a SIGHUP and leaves them running. Sent to the whole group, a signal may reach the command
+  twice: from the sender, and from the wrapper unless the command has exited by then.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (where
   `/proc/self/stat` cannot be read — not Linux, a chroot without `/proc` — while its stdin is a
-  terminal): Ctrl-C has reached every process of it, and a second one is a
-  forced exit with no cleanup to vitest and npm. A Ctrl-C that comes while the wrapper is starting
-  the command, before it runs, does not reach the command.
-- **Limits**: a command that ignores the signal keeps the wrapper and its slots until it exits. What a
-  command leaves running when it exits — on its own or on a signal — runs on.
+  terminal): Ctrl-C has reached every process of it, and a second one is a forced exit with no
+  cleanup to vitest and npm. The group is read when the wrapper handles the signal: a Ctrl-C followed
+  by Ctrl-Z and `bg` before that may reach the command twice. A group outside the wrapper's pid
+  namespace counts as not the foreground. A Ctrl-C that comes while the wrapper is starting the
+  command, before it runs, does not reach the command.
+- **Limits**: a SIGTERM to the group (`kill -- -pgid`) leaves a command that ignores it running, with
+  the wrapper and its slots, until it exits. What a command leaves running when it exits — on its own
+  or on a signal — runs on.
 
 - **Width without a slot**: inside an ancestor's slot of the pool it takes none and the width is 1 (the
   ancestor holds one slot for its whole tree); with no pool (not Linux, `CPU_SLOTS=0`) or past the

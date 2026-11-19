@@ -13,7 +13,8 @@ function foreground(): boolean {
     // The name (field 2) may hold spaces and parens; the fields after its last `)` start at the state.
     const f = line.slice(line.lastIndexOf(')') + 2).split(' ');
     const [pgrp, tty, tpgid] = [Number(f[2]), Number(f[4]), Number(f[5])];
-    return tty !== 0 && tpgid === pgrp;
+    // A group outside this pid namespace shows as 0: two of them would look alike.
+    return tty !== 0 && pgrp > 0 && tpgid === pgrp;
   } catch {
     return isatty(0);
   }
