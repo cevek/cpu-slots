@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -8,9 +9,15 @@ const holderScript = fileURLToPath(new URL('./holder.mjs', import.meta.url));
 
 const children: ChildProcess[] = [];
 
-/** Every process a test started goes when the test ends, whatever its outcome. */
+/** Every process a test started goes when the test ends, whatever its outcome — with its whole group. */
 export function killAll(): void {
-  for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
+  for (const c of children.splice(0)) {
+    try {
+      if (c.pid) process.kill(-c.pid, 'SIGKILL');
+    } catch {
+      // The group is already gone.
+    }
+  }
 }
 
 export function track<T extends ChildProcess>(child: T): T {
@@ -28,7 +35,7 @@ export function poolEnv(name: string, slots: number, extra: Record<string, strin
 export type Holder = { child: ChildProcess; held: Promise<void>; times(n: number): Promise<void>; count(): number };
 
 export function holder(env: NodeJS.ProcessEnv, mode: 'hold' | 'nest' | 'cluster' = 'hold'): Holder {
-  const child = track(spawn(process.execPath, [holderScript, mode], { env, stdio: ['pipe', 'pipe', 'inherit'] }));
+  const child = track(spawn(process.execPath, [holderScript, mode], { env, stdio: ['pipe', 'pipe', 'inherit'], detached: true }));
   let count = 0;
   const waits: Array<{ n: number; resolve: () => void }> = [];
   createInterface({ input: child.stdout! }).on('line', (line) => {
@@ -52,26 +59,41 @@ export async function within(p: Promise<unknown>, ms = 30_000): Promise<boolean>
 export const ABSENT_MS = 700;
 export const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Whether `file` holds a line equal to `line` now. */
+export function hasLine(file: string, line: string): boolean {
+  return existsSync(file) && readFileSync(file, 'utf8').split('\n').includes(line);
+}
+
 /** Resolves once `file` holds a line equal to `line` — a wait on the condition the check reads. */
 export async function lineIn(file: string, line: string, ms = 60_000): Promise<boolean> {
-  const { existsSync, readFileSync } = await import('node:fs');
   const until = Date.now() + ms;
-  while (Date.now() < until) {
-    if (existsSync(file) && readFileSync(file, 'utf8').split('\n').includes(line)) return true;
+  for (;;) {
+    if (hasLine(file, line)) return true;
+    if (Date.now() >= until) return false;
     await pause(50);
   }
-  return false;
 }
 
 /** Runs a command to its end (or the cap), collecting its output. */
 export async function run(args: string[], env: NodeJS.ProcessEnv, cwd = repo, ms = 90_000): Promise<{ code: number | null; out: string }> {
-  const child = track(spawn(process.execPath, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] }));
+  const child = track(spawn(process.execPath, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true }));
   let out = '';
   child.stdout!.on('data', (d) => (out += d));
   child.stderr!.on('data', (d) => (out += d));
-  const ended = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+  // `close`, not `exit`: the output is whole only once both streams have ended.
+  const ended = new Promise<number | null>((r) => child.once('close', (code) => r(code)));
   const done = await within(ended, ms);
-  return { code: done ? child.exitCode : null, out };
+  return { code: done ? child.exitCode : null, out, pid: child.pid };
+}
+
+/** Starts a command like `run` and hands back its pid at once, the outcome as a promise. */
+export function start(args: string[], env: NodeJS.ProcessEnv, cwd = repo, ms = 90_000) {
+  const child = track(spawn(process.execPath, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true }));
+  let out = '';
+  child.stdout!.on('data', (d) => (out += d));
+  child.stderr!.on('data', (d) => (out += d));
+  const ended = new Promise<number | null>((r) => child.once('close', (code) => r(code)));
+  return { pid: child.pid!, done: within(ended, ms).then((ok) => ({ code: ok ? child.exitCode : null, out })) };
 }
 
 /** A journal of `start <name>` / `end <name>` lines kept apart: each start followed by its own end. */

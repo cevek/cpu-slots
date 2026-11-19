@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, within } from './support/procs.ts';
+import { hasLine, holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, within } from './support/procs.ts';
 
 afterEach(killAll);
 
@@ -49,7 +49,7 @@ async function runBesideHolder(dir: string, journal: string, pool: string, holdM
   const running = run([VITEST, 'run'], env, dir);
   const imported = await lineIn(journal, 'imported');
   await new Promise((r) => setTimeout(r, holdMs));
-  const waitedThrough = outside.child.exitCode === null && !(await lineIn(journal, 'start a', 0));
+  const waitedThrough = outside.child.exitCode === null && !hasLine(journal, 'start a');
   outside.child.stdin!.end();
   return { ...(await running), imported, waitedThrough };
 }

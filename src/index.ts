@@ -18,7 +18,8 @@ const NOTICE_MS = 60_000;
 /** Past it a waiter runs without a slot, and says so: a holder that never lets go (a hung test file
  * with no timeout of its own) must not stop every test run of the machine. */
 export const WAIT_CEILING_MS = 10 * 60_000;
-const NOOP: Slot = { release() {}, env: {} };
+// Fresh each time: a caller may add to the `env` it gets.
+const noSlot = (): Slot => ({ release() {}, env: {} });
 
 // Strong references for the holder's life: a collected server would close its fd, and the slot with it.
 const held = new Set<Server>();
@@ -69,7 +70,7 @@ const heldPools = (env: NodeJS.ProcessEnv) => (env[HELD] ?? '').split(',').filte
  */
 export function acquireSlot(env: NodeJS.ProcessEnv = process.env): Promise<Slot> {
   const p = pool(env);
-  if (!p || heldPools(env).includes(p.name)) return Promise.resolve(NOOP);
+  if (!p || heldPools(env).includes(p.name)) return Promise.resolve(noSlot());
   const key = `${p.name}/${p.slots}`;
   const q = queues.get(key) ?? { pool: p, waiters: [], polling: false };
   queues.set(key, q);
@@ -87,12 +88,12 @@ async function poll(q: Queue): Promise<void> {
   try {
     while (waiters.length > 0) {
       if (broken) {
-        for (const w of waiters.splice(0)) w.resolve(NOOP);
+        for (const w of waiters.splice(0)) w.resolve(noSlot());
         return;
       }
       while (waiters.length > 0 && now() - waiters[0]!.since > WAIT_CEILING_MS) {
         note(`no slot of pool "${p.name}" in ${WAIT_CEILING_MS / 60_000} min — running WITHOUT one (holders: ss -xlp | grep 'cpu-slots/${p.name}/')`);
-        waiters.shift()!.resolve(NOOP);
+        waiters.shift()!.resolve(noSlot());
       }
       if (now() >= yieldUntil) {
         // No order among the machine's waiters: concurrent runs finish together.

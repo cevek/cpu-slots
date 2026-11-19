@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, within } from './support/procs.ts';
+import { hasLine, holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, start, within } from './support/procs.ts';
 
 
 afterEach(killAll);
@@ -40,7 +40,7 @@ it('`cpu-slots-node --test`: a test file that forks a node child with a cwd of i
   // The child inherits the preload's `--import`; resolved by a bare name from that cwd it would not be found.
   const f = fixtures('nt-fork', {
     'child.mjs': `process.stdout.write('child ran');\n`,
-    'a.test.mjs': `import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { fork } from 'node:child_process';\nimport { tmpdir } from 'node:os';\nimport { fileURLToPath } from 'node:url';\ntest('fork', async () => {\n  const c = fork(fileURLToPath(new URL('./child.mjs', import.meta.url)), [], { cwd: tmpdir(), stdio: 'pipe' });\n  let out = '';\n  c.stdout.on('data', (d) => (out += d));\n  c.stderr.on('data', (d) => (out += d));\n  const code = await new Promise((r) => c.on('exit', r));\n  assert.strictEqual(code, 0, out);\n  assert.strictEqual(out, 'child ran');\n});\n`,
+    'a.test.mjs': `import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { fork } from 'node:child_process';\nimport { tmpdir } from 'node:os';\nimport { fileURLToPath } from 'node:url';\ntest('fork', async () => {\n  const c = fork(fileURLToPath(new URL('./child.mjs', import.meta.url)), [], { cwd: tmpdir(), stdio: 'pipe' });\n  let out = '';\n  c.stdout.on('data', (d) => (out += d));\n  c.stderr.on('data', (d) => (out += d));\n  const code = await new Promise((r) => c.on('close', r));\n  assert.strictEqual(code, 0, out);\n  assert.strictEqual(out, 'child ran');\n});\n`,
   });
   try {
     const r = await run([BIN, '--test', join(f.dir, 'a.test.mjs')], poolEnv('nt-fork', 2));
@@ -52,19 +52,42 @@ it('`cpu-slots-node --test`: a test file that forks a node child with a cwd of i
 
 // Node 22 starts a file's `--test-timeout` before its process does, so the wait counts there (README).
 it.runIf(linux && nodeMajor >= 24)('`--test-timeout` does not count the wait for a slot (Node 24+)', async () => {
-  const f = fixtures('nt-timeout', { 'a.test.mjs': timed('a') });
+  const f = fixtures('nt-timeout', {
+    'a.test.mjs': timed('a'),
+    'ready.mjs': `import { appendFileSync } from 'node:fs';\nif (process.env.NODE_TEST_CONTEXT?.startsWith('child')) appendFileSync(JOURNAL, 'ready\\n');\n`,
+  });
   try {
     const env = poolEnv('nt-timeout', 1);
     const outside = holder(env);
     expect(await within(outside.held)).toBe(true);
-    const running = run([BIN, '--test', '--test-timeout=1000', join(f.dir, 'a.test.mjs')], env);
+    // A preload ahead of the slot's says the file's process is up: from then on it waits for the slot.
+    const register = new URL('../dist/register.js', import.meta.url).href;
+    const running = run(['--import', join(f.dir, 'ready.mjs'), '--import', register, '--test', '--test-timeout=1000', join(f.dir, 'a.test.mjs')], env);
+    expect(await lineIn(f.journal, 'ready')).toBe(true);
     // Absence: past the timeout the file has not been imported — its process waits in the preload.
     await new Promise((r) => setTimeout(r, 2_000));
-    expect(await lineIn(f.journal, 'imported a', 0)).toBe(false);
+    expect(hasLine(f.journal, 'imported a')).toBe(false);
     outside.child.stdin!.end();
     const r = await running;
     expect(r.code, r.out).toBe(0);
-    expect(journalOf(f.journal)).toEqual(['imported a', 'start a', 'end a']);
+    expect(journalOf(f.journal)).toEqual(['ready', 'imported a', 'start a', 'end a']);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+it.runIf(linux)('a signal to `cpu-slots-node` reaches the test files: the slot one held goes free', async () => {
+  const f = fixtures('nt-signal', {
+    'a.test.mjs': `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\ntest('a', async () => {\n  appendFileSync(JOURNAL, 'start a\\n');\n  await new Promise((r) => setTimeout(r, 60_000));\n});\n`,
+  });
+  try {
+    const env = poolEnv('nt-signal', 1);
+    const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
+    expect(await lineIn(f.journal, 'start a')).toBe(true);
+    const next = holder(env);
+    process.kill(wrapper.pid, 'SIGHUP');
+    // Well short of the test's own minute: only the signal can free the slot this soon.
+    expect(await within(next.held, 10_000)).toBe(true);
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
