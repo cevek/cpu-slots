@@ -84,7 +84,8 @@ its slots are held until it ends.
 - **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone; what becomes of its children is
   the command's, as with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to its command as SIGTERM —
   to any, not only `node --test`, the reason for it: the runner ends its test files on SIGTERM, but
-  dies of a SIGHUP and leaves them running. Sent to the whole group, a signal may reach the command
+  dies of a SIGHUP and leaves them running — a SIGHUP to the wrapper's pid; one to the whole group
+  reaches the runner itself, which may die of it first. Sent to the whole group, a signal may reach the command
   twice: from the sender, and from the wrapper unless the command has exited by then.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (where
   `/proc/self/stat` cannot be read — not Linux, a chroot without `/proc` — while its stdin is a
