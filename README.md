@@ -61,7 +61,7 @@ try {
 run, with a width:
 
 ```sh
-cpu-slots-run --max 8 -- eslint . --concurrency {slots}
+cpu-slots-run --max 4 -- eslint . --concurrency {slots}
 cpu-slots-run --max 4 -- tsgo --checkers {slots}
 cpu-slots-run -- eslint src test        # single-threaded: one slot
 ```
