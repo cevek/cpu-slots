@@ -1,0 +1,75 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+export const linux = process.platform === 'linux';
+export const repo = fileURLToPath(new URL('../..', import.meta.url));
+const holderScript = fileURLToPath(new URL('./holder.mjs', import.meta.url));
+
+const children: ChildProcess[] = [];
+
+/** Every process a test started goes when the test ends, whatever its outcome. */
+export function killAll(): void {
+  for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
+}
+
+export function track<T extends ChildProcess>(child: T): T {
+  children.push(child);
+  return child;
+}
+
+/** A pool of this test run's own: never the machine's, never another case's. */
+export function poolEnv(name: string, slots: number, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, CPU_SLOTS: String(slots), CPU_SLOTS_POOL: `t${process.pid}-${name}`, ...extra };
+  if (!('CPU_SLOTS_HELD' in extra)) delete env['CPU_SLOTS_HELD'];
+  return env;
+}
+
+export type Holder = { child: ChildProcess; held: Promise<void>; times(n: number): Promise<void>; count(): number };
+
+export function holder(env: NodeJS.ProcessEnv, mode: 'hold' | 'nest' | 'cluster' = 'hold'): Holder {
+  const child = track(spawn(process.execPath, [holderScript, mode], { env, stdio: ['pipe', 'pipe', 'inherit'] }));
+  let count = 0;
+  const waits: Array<{ n: number; resolve: () => void }> = [];
+  createInterface({ input: child.stdout! }).on('line', (line) => {
+    if (line !== 'HELD') return;
+    count++;
+    for (const w of waits) if (count >= w.n) w.resolve();
+  });
+  const times = (n: number) => new Promise<void>((resolve) => (count >= n ? resolve() : waits.push({ n, resolve })));
+  return { child, held: times(1), times, count: () => count };
+}
+
+/** A wait's deadline is a cap: whatever it waits for returns at once. */
+export async function within(p: Promise<unknown>, ms = 30_000): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const ok = await Promise.race([p.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), ms)))]);
+  clearTimeout(timer);
+  return ok;
+}
+
+/** Absence only: how long a process that should NOT get a slot is given to get one anyway. */
+export const ABSENT_MS = 700;
+export const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Runs a command to its end (or the cap), collecting its output. */
+export async function run(args: string[], env: NodeJS.ProcessEnv, cwd = repo, ms = 90_000): Promise<{ code: number | null; out: string }> {
+  const child = track(spawn(process.execPath, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] }));
+  let out = '';
+  child.stdout!.on('data', (d) => (out += d));
+  child.stderr!.on('data', (d) => (out += d));
+  const ended = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+  const done = await within(ended, ms);
+  return { code: done ? child.exitCode : null, out };
+}
+
+/** A journal of `start <name>` / `end <name>` lines kept apart: each start followed by its own end. */
+export function oneAtATime(lines: string[], n: number): boolean {
+  return (
+    lines.length === 2 * n &&
+    lines.every((l, i) => {
+      const [what, name] = l.split(' ');
+      return what === (i % 2 === 0 ? 'start' : 'end') && (i % 2 === 0 || name === lines[i - 1]!.split(' ')[1]);
+    })
+  );
+}
