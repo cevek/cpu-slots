@@ -128,8 +128,11 @@ async function traced(file: string, match: (t: Traced) => boolean, ms = 10_000):
   }
 }
 
-/** How many times wrappers sent `sig` to `pid`. */
-const sends = (file: string, sig: string, pid: number) => traceOf(file).filter((t) => t.what === `${sig} sent` && t.pids.includes(pid)).length;
+/** How many times wrappers sent `sig` to `pid`: every mention counts, two in one line too. */
+const sends = (file: string, sig: string, pid: number) =>
+  traceOf(file)
+    .filter((t) => t.what === `${sig} sent`)
+    .reduce((n, t) => n + t.pids.filter((p) => p === pid).length, 0);
 
 it.runIf(linux)('what the command forks in its SIGTERM handler goes with it: the noted tree grows until the command exits', async () => {
   const s = scratch('run-fork-on-term');
@@ -153,15 +156,22 @@ it.runIf(linux)('what the command forks in its SIGTERM handler goes with it: the
   }
 });
 
-it.runIf(linux)('a trace path that is a FIFO with no reader is no trace: the wrapper does not block on it', async () => {
+it.runIf(linux)('a trace file turned into a FIFO with no reader is no trace: a signal still goes on', async () => {
   const s = scratch('run-trace-fifo');
+  const trace = join(s.dir, 'trace');
   try {
-    const fifo = join(s.dir, 'fifo');
-    expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
-    // Lives past the wrapper's first note, which would open the FIFO.
-    const r = await run([RUN, '--', process.execPath, '-e', 'setTimeout(() => {}, 1500)'], poolEnv('run-trace-fifo', 2, { CPU_SLOTS_TRACE: fifo }), repo, 15_000);
-    expect(r.code, r.out).toBe(0);
+    const cmd = start([RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGTERM')], poolEnv('run-trace-fifo', 2, { CPU_SLOTS_TRACE: trace }));
+    const pid = await pidOf(s.journal, 'command');
+    expect(pid).toBeGreaterThan(0);
+    // A regular file while the wrapper starts and notes; a FIFO from here on.
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'noted')).toBe(true);
+    rmSync(trace);
+    expect(spawnSync('mkfifo', [trace]).status).toBe(0);
+    process.kill(cmd.pid, 'SIGTERM');
+    expect(await lineIn(s.journal, 'SIGTERM', 10_000)).toBe(true);
+    expect(await probe(pid, cmd.done)).toBe(0);
   } finally {
+    killPids(s.journal);
     rmSync(s.dir, { recursive: true, force: true });
   }
 });
@@ -243,6 +253,8 @@ it.runIf(linux)('a SIGINT to the outer of two nested wrappers is sent to the com
     const cmd = start([RUN, '--', process.execPath, RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGINT')], poolEnv('run-nested-sigint', 2, { CPU_SLOTS_TRACE: trace }));
     const pid = await pidOf(s.journal, 'command');
     expect(pid).toBeGreaterThan(0);
+    // The outer one has the command noted already: its walk at the signal meets it again.
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'noted' && t.pids.includes(pid))).toBe(true);
     process.kill(cmd.pid, 'SIGINT');
     // Both wrappers have passed it on: the outer one, and the inner one it went to.
     expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'SIGINT sent')).toBe(true);

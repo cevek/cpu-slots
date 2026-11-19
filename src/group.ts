@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readdirSync, readFileSync, readlinkSync, writeSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isatty } from 'node:tty';
 
@@ -9,15 +9,18 @@ export type Proc = { pid: number; start: string };
 /** `covered`: under a live nested wrapper, which passes signals on to it itself. */
 type Noted = Proc & { covered: boolean };
 
-type Stat = { state: string; comm: string; ppid: number; pgrp: number; tty: number; tpgid: number; start: string };
+type Stat = { comm: string; ppid: number; pgrp: number; tty: number; tpgid: number; start: string };
 
 // `/proc` of this process's pid namespace, or none: a chroot may have no /proc, a new pid namespace
-// may see its parent's, whose pids are not the ones `kill()` takes here. Without it the command alone
+// may see an ancestor's, whose pids are not the ones `kill()` takes here (even where its number for
+// this process happens to be the same). NStgid lists this process's pid in the procfs's namespace and
+// each one below it down to its own: one entry is its own namespace. Without it the command alone
 // gets the signals, as on other systems.
 const procfs = (() => {
   if (process.platform !== 'linux') return false;
   try {
-    return readlinkSync('/proc/self') === String(process.pid);
+    const ns = /^NStgid:\s*(.*)$/m.exec(readFileSync('/proc/self/status', 'utf8'));
+    return readlinkSync('/proc/self') === String(process.pid) && ns !== null && ns[1]!.trim() === String(process.pid);
   } catch {
     return false;
   }
@@ -31,14 +34,14 @@ function stat(pid: number | 'self'): Stat | null {
     // The name (field 2) may hold spaces and parens; the fields after its last `)` start at the state.
     const end = line.lastIndexOf(')');
     const f = line.slice(end + 2).split(' ');
-    return { state: f[0]!, comm: line.slice(line.indexOf('(') + 1, end), ppid: Number(f[1]), pgrp: Number(f[2]), tty: Number(f[4]), tpgid: Number(f[5]), start: f[19]! };
+    return { comm: line.slice(line.indexOf('(') + 1, end), ppid: Number(f[1]), pgrp: Number(f[2]), tty: Number(f[4]), tpgid: Number(f[5]), start: f[19]! };
   } catch {
     return null;
   }
 }
 
-/** Running as noted: a zombie has ended (and a zombie wrapper passes nothing on). */
-const running = (s: Stat | null, start: string) => s !== null && s.start === start && s.state !== 'Z' && s.state !== 'X';
+// A `Z` state is no end: a leader that left by `pthread_exit` shows it while its other threads run.
+const running = (s: Stat | null, start: string) => s !== null && s.start === start;
 const live = (p: Proc) => running(stat(p.pid), p.start);
 
 /** The process running under `pid` now (Linux). */
@@ -138,23 +141,19 @@ export function signalLive(procs: Iterable<Proc>, sig: NodeJS.Signals): number[]
 
 // `CPU_SLOTS_TRACE=<file>`: a line per note of the tree and per signal passed on, for tests and for
 // seeing what a wrapper did.
-// A regular file or none: opening a FIFO with no reader would block the wrapper mid-cancel.
-const traceFile = (() => {
-  const path = process.env['CPU_SLOTS_TRACE'];
-  if (!path) return undefined;
-  try {
-    const st = statSync(path, { throwIfNoEntry: false });
-    return !st || st.isFile() ? path : undefined;
-  } catch {
-    return undefined;
-  }
-})();
+const traceFile = process.env['CPU_SLOTS_TRACE'];
 function trace(line: string): void {
   if (!traceFile) return;
+  let fd: number | undefined;
   try {
-    appendFileSync(traceFile, `${process.pid} ${line}\n`);
+    // Non-blocking, and a regular file only: a FIFO with no reader, there at the start or put in its
+    // place since, would block the wrapper mid-cancel.
+    fd = openSync(traceFile, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NONBLOCK, 0o644);
+    if (fstatSync(fd).isFile()) writeSync(fd, `${process.pid} ${line}\n`);
   } catch {
     // Tracing never stops the wrapper.
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -218,21 +217,21 @@ export function runInGroup(command: string, args: string[], env: NodeJS.ProcessE
       const sent: number[] = [];
       if (commandRunning()) {
         const pass = sig !== 'SIGINT' || !foreground();
-        if (!procfs) {
-          // Not `child.kill`: a failure there (EPERM) is an `error` event, taken for a failed spawn.
-          try {
-            if (pass) {
-              process.kill(child.pid!, sig);
-              sent.push(child.pid!);
-            }
-          } catch {
-            // Gone or not ours to signal any more.
-          }
-        } else {
+        if (procfs) {
           signalled = true;
           note(true);
           schedule();
           if (pass) sent.push(...signalLive(noted.filter((p) => !p.covered), sig));
+        }
+        // No /proc, or the command's stat unreadable (`hidepid`): the command itself all the same.
+        if (pass && !sent.includes(child.pid!) && !noted.some((p) => p.pid === child.pid)) {
+          // Not `child.kill`: a failure there (EPERM) is an `error` event, taken for a failed spawn.
+          try {
+            process.kill(child.pid!, sig);
+            sent.push(child.pid!);
+          } catch {
+            // Gone or not ours to signal any more.
+          }
         }
       }
       trace(`${sig} sent ${sent.join(',')}`);

@@ -78,11 +78,13 @@ its slots are held until it ends. A kill of the caller's group (an agent tool's 
 `kill -- -pgid`, a SIGKILL included) takes the command with the wrapper, and what of its tree is still
 in that group.
 
-- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux with `/proc`;
-  elsewhere to the command alone, and nothing below is noted or killed). Below a live nested wrapper
-  they go to that wrapper alone, and it passes them on: one delivery each (a process orphaned there
-  may get them from both). Sent to the whole group (outside a terminal's
-  foreground for SIGINT), they reach a process twice.
+- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux with a `/proc`
+  of the wrapper's own pid namespace; elsewhere to the command alone, and nothing below is noted or
+  killed; processes `hidepid` hides from the wrapper get nothing beyond the command). Below a live
+  nested wrapper they go to that wrapper alone, and it passes them on: one delivery each from an
+  addressed signal (a process orphaned there may get it from both). Sent to the whole group (outside
+  a terminal's foreground for SIGINT), they may reach a process more than once, nested wrappers
+  each passing on what they got.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
   forced exit with no cleanup to vitest and npm.
@@ -93,7 +95,8 @@ in that group.
   still runs when the command exits gets SIGKILL — a nested wrapper's command, a child forked in a
   signal handler, a child left by a command a group's Ctrl-C ended first. A noted pid gets a signal
   only under the start time it was noted with. The wrapper's process title is `cpu-slots-run: <command>`
-  (`cpu-slots-node: …`): by it an outer wrapper knows a nested one.
+  (`cpu-slots-node: …`): by it an outer wrapper knows a nested one, and a process that takes such a
+  title is taken for one.
 - **Limits of that**: a process forked and left behind between two notes (under 100 ms after a signal,
   under a second before one) runs on. A command that ignores SIGTERM keeps the wrapper and its slots
   until it exits or gets a SIGKILL. A command that exits on its own leaves what it started running.
