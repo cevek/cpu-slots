@@ -89,16 +89,17 @@ describe.runIf(linux)('under a pool of one', () => {
     });
   }
 
+  // Both files throw in their own afterAll: whichever the worker runs first, the second needs the
+  // slot the first had — in the same process, where a slot not given back is a wait for itself.
   it("one worker, isolate false: a file whose own afterAll throws gives the slot back, and the worker's next file gets it", async () => {
-    const p = project('v-afterall', { pool: 'forks', isolate: false, maxWorkers: 1 }, {
-      'a.test.mjs': `import { afterAll, test } from 'vitest';\nafterAll(() => { throw new Error('afterAll of a throws'); });\ntest('a', () => {});\n`,
-      'b.test.mjs': timed('b'),
-    });
+    const throwing = (name: string) => `import { afterAll } from 'vitest';\nafterAll(() => { throw new Error('afterAll of ${name} throws'); });\n${timed(name)}`;
+    const p = project('v-afterall', { pool: 'forks', isolate: false, maxWorkers: 1 }, { 'a.test.mjs': throwing('a'), 'b.test.mjs': throwing('b') });
     try {
-      const r = await run([VITEST, 'run'], poolEnv('v-afterall', 1), p.dir);
+      const r = await run([VITEST, 'run'], poolEnv('v-afterall', 1), p.dir, 30_000);
       expect(r.code, r.out).toBe(1);
       expect(r.out).toMatch(/afterAll of a throws/);
-      expect(journalOf(p.journal)).toEqual(['start b', 'end b']);
+      expect(r.out).toMatch(/afterAll of b throws/);
+      expect(oneAtATime(journalOf(p.journal), 2), journalOf(p.journal).join('|')).toBe(true);
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
