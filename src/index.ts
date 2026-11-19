@@ -81,6 +81,24 @@ export function acquireSlot(env: NodeJS.ProcessEnv = process.env): Promise<Slot>
   });
 }
 
+/**
+ * One pass over the pool's names, no wait: a slot if one is free now, else `null` — also when the
+ * pool is off or an ancestor's slot covers this process.
+ */
+export async function tryAcquireSlot(env: NodeJS.ProcessEnv = process.env): Promise<Slot | null> {
+  const p = pool(env);
+  if (!p || heldPools(env).includes(p.name)) return null;
+  const mark = [...heldPools(env), p.name].join(',');
+  const from = Math.floor(Math.random() * p.slots);
+  for (let k = 0; k < p.slots; k++) {
+    const server = await bind(nameOf(p, (from + k) % p.slots));
+    if (server) return hold(server, mark);
+  }
+  return null;
+}
+
+const nameOf = (p: Pool, i: number) => `\0cpu-slots/${p.name}/${i}`;
+
 async function poll(q: Queue): Promise<void> {
   if (q.polling) return;
   q.polling = true;
@@ -99,7 +117,7 @@ async function poll(q: Queue): Promise<void> {
         // No order among the machine's waiters: concurrent runs finish together.
         const from = Math.floor(Math.random() * p.slots);
         for (let k = 0; k < p.slots && waiters.length > 0; k++) {
-          const server = await bind(`\0cpu-slots/${p.name}/${(from + k) % p.slots}`);
+          const server = await bind(nameOf(p, (from + k) % p.slots));
           if (!server) continue;
           const w = waiters.shift()!;
           w.resolve(hold(server, w.mark));

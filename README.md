@@ -57,6 +57,23 @@ try {
 }
 ```
 
+**ESLint, `tsgo`, a build** — a heavy command with no test file to wait for runs in slots for its whole
+run, with a width:
+
+```sh
+cpu-slots-run --max 8 -- eslint . --concurrency {slots}
+cpu-slots-run --max 4 -- tsgo --checkers {slots}
+cpu-slots-run -- eslint src test        # single-threaded: one slot
+```
+
+`cpu-slots-run` waits for one slot, takes the free ones up to `--max` (default 1) without waiting, and
+hands their number to the command: every `{slots}` in its arguments, and `CPU_SLOTS_WIDTH`. The width is
+fixed at the start — one that started on a busy machine stays narrow. The command runs in a process
+group of its own, a signal to the wrapper reaches the whole group, its exit code passes through, and its
+slots are held until it ends. With no pool (not Linux, `CPU_SLOTS=0`) or inside an ancestor's slot it
+takes none, and the width is `--max`. Linting has no timeouts to break: what this buys is that its CPU
+counts, and the tests running in slots beside it are not stretched by it.
+
 If a run used to go through `cpu-mutex` (one heavy run at a time), drop that wrapper from the test
 command: it would queue whole runs again, tail and all.
 
@@ -72,7 +89,10 @@ is binding the name; giving it back is closing the socket.
 - **One unit, one slot**: a test file holds a slot while it runs, so the tail of a long run — one slow
   file — holds one slot, not the machine.
 
-With the default size (the machine's logical CPUs), eight full runs of a 202-file suite at once on a
+The pool's size follows the machine: by default its logical CPUs (`os.cpus()`) — 16 slots on a
+16-CPU host, 4 on a 4-vCPU CI runner. `CPU_SLOTS` overrides it.
+
+With the default size, eight full runs of a 202-file suite at once on a
 16-CPU machine had no timeout (31 without the pool) and stretched a file at most 2.4× (14.9×
 without), for about 10% of throughput: a file waiting on its own timers holds a slot nearly idle.
 24 slots kept the throughput and stretched up to 4.1×.
@@ -113,6 +133,7 @@ process and nothing is held.
 | Variable         | Effect                                                                                   |
 | ---------------- | ---------------------------------------------------------------------------------------- |
 | `CPU_SLOTS`      | the pool's size, up to 9999; default the machine's logical CPUs; `0` — off              |
+| `CPU_SLOTS_WIDTH`| set by `cpu-slots-run` for its command: the slots it took                                |
 | `CPU_SLOTS_POOL` | the pool's name (`[A-Za-z0-9_.-]`, up to 64), default `default`; pools never contend     |
 | `CPU_SLOTS_HELD` | set for a holder's children; the pools an ancestor holds a slot of                       |
 
@@ -132,6 +153,8 @@ process and nothing is held.
 - `acquireSlot(env = process.env): Promise<{ release(): void; env: Record<string, string> }>` —
   resolves once this process holds a slot of the pool `env` names. `env` is what the holder's children
   get; `{}` when no slot was taken here (off, an ancestor's slot, past the ceiling).
+- `tryAcquireSlot(env = process.env): Promise<Slot | null>` — one pass over the names, no wait: a slot
+  if one is free now, else `null` (also when off or inside an ancestor's slot).
 - `pool(env = process.env): { name, slots } | null` — the pool as this process sees it; `null` when off.
 - `WAIT_CEILING_MS` — how long a waiter waits before running without a slot.
 

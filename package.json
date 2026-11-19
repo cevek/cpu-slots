@@ -19,7 +19,8 @@
     }
   },
   "bin": {
-    "cpu-slots-node": "./dist/node-bin.js"
+    "cpu-slots-node": "./dist/node-bin.js",
+    "cpu-slots-run": "./dist/run-bin.js"
   },
   "files": [
     "dist"
@@ -28,7 +29,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/node-bin.js",
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/node-bin.js dist/run-bin.js",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "npm run build && vitest run",
