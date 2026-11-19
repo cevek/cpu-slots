@@ -1,28 +1,71 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { killAll, linux, oneAtATime, poolEnv, repo, run } from './support/procs.ts';
+import { holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, within } from './support/procs.ts';
+
 
 afterEach(killAll);
 
-it.runIf(linux)('`node --test --import cpu-slots/register`: under a pool of one its files run one at a time, and the run ends', async () => {
-  const dir = join(repo, '.fixtures', `node-test-${process.pid}`);
+const BIN = join(repo, 'dist', 'node-bin.js');
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+
+function fixtures(name: string, files: Record<string, string>): { dir: string; journal: string } {
+  const dir = join(repo, '.fixtures', `${name}-${process.pid}`);
+  rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const journal = join(dir, 'journal');
+  for (const [file, body] of Object.entries(files)) writeFileSync(join(dir, file), body.replaceAll('JOURNAL', JSON.stringify(journal)));
+  return { dir, journal };
+}
+
+const timed = (name: string) =>
+  `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\nappendFileSync(JOURNAL, 'imported ${name}\\n');\ntest('${name}', async () => {\n  appendFileSync(JOURNAL, 'start ${name}\\n');\n  await new Promise((r) => setTimeout(r, 300));\n  appendFileSync(JOURNAL, 'end ${name}\\n');\n});\n`;
+
+const journalOf = (journal: string) => readFileSync(journal, 'utf8').trim().split('\n');
+
+it.runIf(linux)('`cpu-slots-node --test`: under a pool of one its files run one at a time, and the run ends', async () => {
+  const f = fixtures('nt', { 'a.test.mjs': timed('a'), 'b.test.mjs': timed('b'), 'c.test.mjs': timed('c') });
   try {
-    for (const name of ['a', 'b', 'c']) {
-      writeFileSync(
-        join(dir, `${name}.test.mjs`),
-        `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\ntest('${name}', async () => {\n  appendFileSync(${JSON.stringify(journal)}, 'start ${name}\\n');\n  await new Promise((r) => setTimeout(r, 300));\n  appendFileSync(${JSON.stringify(journal)}, 'end ${name}\\n');\n});\n`,
-      );
-    }
-    // Three at once unless the slots keep them apart; the preload by the package's own name, as a
-    // project imports it (the package resolves itself from inside its own tree).
-    const files = ['a', 'b', 'c'].map((n) => join(dir, `${n}.test.mjs`));
-    const r = await run(['--test', '--test-concurrency=3', '--import', 'cpu-slots/register', ...files], poolEnv('node-test', 1));
+    // Three at once unless the slots keep them apart.
+    const r = await run([BIN, '--test', '--test-concurrency=3', ...['a', 'b', 'c'].map((n) => join(f.dir, `${n}.test.mjs`))], poolEnv('nt', 1));
     expect(r.code, r.out).toBe(0);
-    expect(oneAtATime(readFileSync(journal, 'utf8').trim().split('\n'), 3), readFileSync(journal, 'utf8')).toBe(true);
+    const lines = journalOf(f.journal).filter((l) => !l.startsWith('imported '));
+    expect(oneAtATime(lines, 3), lines.join('|')).toBe(true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+it('`cpu-slots-node --test`: a test file that forks a node child with a cwd of its own runs it', async () => {
+  // The child inherits the preload's `--import`; resolved by a bare name from that cwd it would not be found.
+  const f = fixtures('nt-fork', {
+    'child.mjs': `process.stdout.write('child ran');\n`,
+    'a.test.mjs': `import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { fork } from 'node:child_process';\nimport { tmpdir } from 'node:os';\nimport { fileURLToPath } from 'node:url';\ntest('fork', async () => {\n  const c = fork(fileURLToPath(new URL('./child.mjs', import.meta.url)), [], { cwd: tmpdir(), stdio: 'pipe' });\n  let out = '';\n  c.stdout.on('data', (d) => (out += d));\n  c.stderr.on('data', (d) => (out += d));\n  const code = await new Promise((r) => c.on('exit', r));\n  assert.strictEqual(code, 0, out);\n  assert.strictEqual(out, 'child ran');\n});\n`,
+  });
+  try {
+    const r = await run([BIN, '--test', join(f.dir, 'a.test.mjs')], poolEnv('nt-fork', 2));
+    expect(r.code, r.out).toBe(0);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// Node 22 starts a file's `--test-timeout` before its process does, so the wait counts there (README).
+it.runIf(linux && nodeMajor >= 24)('`--test-timeout` does not count the wait for a slot (Node 24+)', async () => {
+  const f = fixtures('nt-timeout', { 'a.test.mjs': timed('a') });
+  try {
+    const env = poolEnv('nt-timeout', 1);
+    const outside = holder(env);
+    expect(await within(outside.held)).toBe(true);
+    const running = run([BIN, '--test', '--test-timeout=1000', join(f.dir, 'a.test.mjs')], env);
+    // Absence: past the timeout the file has not been imported — its process waits in the preload.
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(await lineIn(f.journal, 'imported a', 0)).toBe(false);
+    outside.child.stdin!.end();
+    const r = await running;
+    expect(r.code, r.out).toBe(0);
+    expect(journalOf(f.journal)).toEqual(['imported a', 'start a', 'end a']);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
   }
 });

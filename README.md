@@ -32,8 +32,16 @@ export default defineConfig({
 **`node --test`** (files in processes of their own — the default isolation):
 
 ```sh
-node --test --import cpu-slots/register "test/**/*.test.ts"
+cpu-slots-node --test "test/**/*.test.ts"
 ```
+
+`cpu-slots-node` is `node --import <cpu-slots/register by absolute URL>`. Not `--import cpu-slots/register`
+by name: a test that forks a node child with a cwd of its own hands it the same `--import`, and the name
+resolved from there is a module not found.
+
+On Node 22 a file's `--test-timeout` starts before its process does, so it counts the wait for a slot:
+there, set timeouts on the tests (`test(name, { timeout }, fn)`) rather than on the command line. Node 24
+counts it from the file's own start.
 
 **Your own runner:**
 
@@ -71,17 +79,18 @@ without), for about 10% of throughput: a file waiting on its own timers holds a 
 
 ### vitest
 
-The setup file takes the slot in an `aroundAll` and gives it back in its `finally`. Registered first,
-it is the outermost wrapper: the slot goes back after every `afterAll`, cleanup and fixture of the
-file, a throwing one included. A file whose tests are all filtered out, or that fails to import, runs
-no hook and takes no slot. Importing and transforming a file run outside the slot. Not for the
-browser mode: the setup file runs in node.
+The setup file takes the slot in an `aroundAll` and gives it back in its `finally`. List it first in
+`setupFiles` (and, if another setup file registers an `aroundAll` of its own, set
+`sequence: { setupFiles: 'list' }`): registered first, it is the outermost wrapper — the slot goes
+back after every `afterAll`, cleanup and fixture of the file, a throwing one included. A file whose
+tests are all filtered out, or that fails to import, runs no hook and takes no slot. Importing and
+transforming a file run outside the slot. Not for the browser mode: the setup file runs in node.
 
 ### `node --test`
 
 The preload takes the slot in each test file's process before the file runs and keeps it until that
-process exits; the runner's own process takes none. A wait in the preload is not counted by
-`--test-timeout`. With `--test-isolation=none` there is no file process and nothing is held.
+process exits; the runner's own process takes none. With `--test-isolation=none` there is no file
+process and nothing is held.
 
 ## Behavior
 
@@ -134,9 +143,10 @@ commit and the tag, `npm publish` checks and publishes, `git push --follow-tags`
 
 The tests that exercise the pool run on Linux only; publish after CI is green.
 
-If `npm publish` fails after `npm version` (a red check, a network error), the version commit and tag
-are local only: fix, then `npm publish` again for the same version. If only the push fails, the
-version is already on npm: `git push --follow-tags` again.
+If `npm publish` fails after `npm version`, first check whether the version reached the registry
+(`npm view cpu-slots@<version> version`) — a network error may hide a publish that went through. Not
+there: fix, then `npm publish` again for the same version. There (or only the push failed):
+`git push --follow-tags`.
 
 ## License
 

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { holder, killAll, linux, oneAtATime, poolEnv, repo, run, within } from './support/procs.ts';
+import { holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, within } from './support/procs.ts';
 
 afterEach(killAll);
 
@@ -38,18 +38,23 @@ function widest(lines: string[]): number {
   return most;
 }
 
-/** Runs the project while a process outside it holds the pool's only slot for `holdMs`. */
-async function runBesideHolder(dir: string, pool: string, holdMs: number, args: string[] = []) {
+/**
+ * Runs the project while a process outside it holds the pool's only slot, and lets it go `holdMs`
+ * after the project's test file has been imported — the file waits for the slot from then on.
+ */
+async function runBesideHolder(dir: string, journal: string, pool: string, holdMs: number) {
   const env = poolEnv(pool, 1);
   const outside = holder(env);
   expect(await within(outside.held)).toBe(true);
-  const release = setTimeout(() => outside.child.stdin!.end(), holdMs);
-  try {
-    return await run([VITEST, 'run', ...args], env, dir);
-  } finally {
-    clearTimeout(release);
-  }
+  const running = run([VITEST, 'run'], env, dir);
+  const imported = await lineIn(journal, 'imported');
+  await new Promise((r) => setTimeout(r, holdMs));
+  const waitedThrough = outside.child.exitCode === null && !(await lineIn(journal, 'start a', 0));
+  outside.child.stdin!.end();
+  return { ...(await running), imported, waitedThrough };
 }
+
+const importedMark = `appendFileSync(JOURNAL, 'imported\\n');\n`;
 
 describe.runIf(linux)('under a pool of one', () => {
   for (const pool of ['forks', 'threads'] as const) {
@@ -92,25 +97,31 @@ describe.runIf(linux)('under a pool of one', () => {
   // Both files throw in their own afterAll: whichever the worker runs first, the second needs the
   // slot the first had — in the same process, where a slot not given back is a wait for itself.
   it("one worker, isolate false: a file whose own afterAll throws gives the slot back, and the worker's next file gets it", async () => {
-    const throwing = (name: string) => `import { afterAll } from 'vitest';\nafterAll(() => { throw new Error('afterAll of ${name} throws'); });\n${timed(name)}`;
+    // At import each file records what the file before it left: the mark in its env, and whether the
+    // pool's only slot is free — bound here by its name for an instant.
+    const throwing = (name: string) =>
+      `import { afterAll } from 'vitest';\nimport { createServer } from 'node:net';\nconst slot = await new Promise((r) => { const s = createServer(); s.once('error', (e) => r(e.code)); s.listen({ path: '\\0cpu-slots/' + process.env.CPU_SLOTS_POOL + '/0', exclusive: true }, () => s.close(() => r('free'))); });\nawait import('node:fs').then((fs) => fs.appendFileSync(JOURNAL, 'import ${name} mark=' + (process.env.CPU_SLOTS_HELD ?? 'none') + ' slot=' + slot + '\\n'));\nafterAll(() => { throw new Error('afterAll of ${name} throws'); });\n${timed(name)}`;
     const p = project('v-afterall', { pool: 'forks', isolate: false, maxWorkers: 1 }, { 'a.test.mjs': throwing('a'), 'b.test.mjs': throwing('b') });
     try {
       const r = await run([VITEST, 'run'], poolEnv('v-afterall', 1), p.dir, 30_000);
       expect(r.code, r.out).toBe(1);
       expect(r.out).toMatch(/afterAll of a throws/);
       expect(r.out).toMatch(/afterAll of b throws/);
-      expect(oneAtATime(journalOf(p.journal), 2), journalOf(p.journal).join('|')).toBe(true);
+      const lines = journalOf(p.journal);
+      expect(lines.filter((l) => l.startsWith('import ')).map((l) => l.replace(/^import \w /, '')), lines.join('|')).toEqual(['mark=none slot=free', 'mark=none slot=free']);
+      expect(oneAtATime(lines.filter((l) => !l.startsWith('import ')), 2), lines.join('|')).toBe(true);
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
   });
 
   it("a wait longer than vitest's hook timeout fails no file", async () => {
-    const p = project('v-longwait', { pool: 'forks', hookTimeout: 1_000 }, { 'a.test.mjs': timed('a') });
+    const p = project('v-longwait', { pool: 'forks', hookTimeout: 1_000 }, { 'a.test.mjs': timed('a') + importedMark });
     try {
-      const r = await runBesideHolder(p.dir, 'v-longwait', 3_000);
+      const r = await runBesideHolder(p.dir, p.journal, 'v-longwait', 3_000);
+      expect(r.imported && r.waitedThrough, r.out).toBe(true);
       expect(r.code, r.out).toBe(0);
-      expect(journalOf(p.journal)).toEqual(['start a', 'end a']);
+      expect(journalOf(p.journal)).toEqual(['imported', 'start a', 'end a']);
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
@@ -118,11 +129,13 @@ describe.runIf(linux)('under a pool of one', () => {
 
   it('a file that fakes the timers at import still gets its slot once it is freed', async () => {
     const p = project('v-faketimers', { pool: 'forks' }, {
-      'a.test.mjs': `import { test, vi } from 'vitest';\nvi.useFakeTimers();\ntest('a', () => {});\n`,
+      'a.test.mjs': `import { test, vi } from 'vitest';\nimport { appendFileSync } from 'node:fs';\nvi.useFakeTimers();\n${importedMark}test('a', () => { appendFileSync(JOURNAL, 'start a\\n'); });\n`,
     });
     try {
-      const r = await runBesideHolder(p.dir, 'v-faketimers', 1_500);
+      const r = await runBesideHolder(p.dir, p.journal, 'v-faketimers', 1_500);
+      expect(r.imported && r.waitedThrough, r.out).toBe(true);
       expect(r.code, r.out).toBe(0);
+      expect(journalOf(p.journal)).toEqual(['imported', 'start a']);
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }

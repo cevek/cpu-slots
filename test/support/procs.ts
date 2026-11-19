@@ -52,6 +52,17 @@ export async function within(p: Promise<unknown>, ms = 30_000): Promise<boolean>
 export const ABSENT_MS = 700;
 export const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Resolves once `file` holds a line equal to `line` — a wait on the condition the check reads. */
+export async function lineIn(file: string, line: string, ms = 60_000): Promise<boolean> {
+  const { existsSync, readFileSync } = await import('node:fs');
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (existsSync(file) && readFileSync(file, 'utf8').split('\n').includes(line)) return true;
+    await pause(50);
+  }
+  return false;
+}
+
 /** Runs a command to its end (or the cap), collecting its output. */
 export async function run(args: string[], env: NodeJS.ProcessEnv, cwd = repo, ms = 90_000): Promise<{ code: number | null; out: string }> {
   const child = track(spawn(process.execPath, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] }));
