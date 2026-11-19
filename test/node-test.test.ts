@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { ABSENT_MS, gone, hasLine, pause, holder, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
+import { tryAcquireSlot } from '../src/index.ts';
+import { gone, hasLine, holder, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
 
 
 afterEach(killAll);
@@ -101,6 +102,22 @@ for (const sig of ['SIGTERM', 'SIGHUP'] as const) {
   });
 }
 
+it('`cpu-slots-node` hands a SIGHUP to its command as SIGTERM, not as any other', async () => {
+  const f = fixtures('nt-hup', {});
+  try {
+    const say = `const say = (l) => require('fs').appendFileSync(${JSON.stringify(f.journal)}, l + '\\n');`;
+    const cmd = `${say} for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(s, () => { say(s); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
+    const wrapper = start([BIN, '--input-type=commonjs', '-e', cmd], poolEnv('nt-hup', 0));
+    expect(await pidOf(f.journal, 'command')).toBeGreaterThan(0);
+    process.kill(wrapper.pid, 'SIGHUP');
+    expect((await wrapper.done).code).toBe(0);
+    expect(readFileSync(f.journal, 'utf8').split('\n').filter((l) => l.startsWith('SIG'))).toEqual(['SIGTERM']);
+  } finally {
+    killPids(f.journal);
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test files: the slot one held goes free", async () => {
   const f = fixtures('nt-group-kill', { 'a.test.mjs': waits });
   try {
@@ -108,14 +125,14 @@ it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test file
     const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
     const pid = await pidOf(f.journal, 'file');
     expect(pid).toBeGreaterThan(0);
-    const next = holder(env);
     // The file holds the pool's one slot: only its end frees it.
-    await pause(ABSENT_MS);
-    expect(next.count()).toBe(0);
+    const taken = await tryAcquireSlot(env);
+    taken?.release();
+    expect(taken).toBeNull();
     // `start` makes the wrapper a group leader: an agent tool's timeout kills its group like this.
     process.kill(-wrapper.pid, 'SIGKILL');
     expect(await gone(pid)).toBe(true);
-    expect(await within(next.held, 10_000)).toBe(true);
+    expect(await within(holder(env).held, 10_000)).toBe(true);
   } finally {
     killPids(f.journal);
     rmSync(f.dir, { recursive: true, force: true });

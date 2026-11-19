@@ -80,15 +80,7 @@ it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to th
 const COUNTS = (journal: string) =>
   `${sayTo(journal)} process.on('SIGINT', () => say('SIGINT')); process.on('SIGTERM', () => { say('SIGTERM'); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
 
-/**
- * SIGINT, then SIGTERM, to the wrapper. It handles them in that order (standard signals pending
- * together go lowest number first), so a SIGINT it passes on reaches the command before the SIGTERM
- * that ends it: the count the command says is the count the wrapper sent.
- */
-function interruptThenEnd(wrapper: number): void {
-  process.kill(wrapper, 'SIGINT');
-  process.kill(wrapper, 'SIGTERM');
-}
+const SPY = join(repo, 'test', 'support', 'kill-spy.mjs');
 
 it('a SIGTERM to the wrapper reaches the command', async () => {
   const s = scratch('run-sigterm');
@@ -109,7 +101,9 @@ it('a SIGINT to the wrapper alone, with no terminal, reaches the command once', 
   try {
     const cmd = start([RUN, '--', process.execPath, '-e', COUNTS(s.journal)], poolEnv('run-sigint', 0));
     expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
-    interruptThenEnd(cmd.pid);
+    process.kill(cmd.pid, 'SIGINT');
+    expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
+    process.kill(cmd.pid, 'SIGTERM');
     expect((await cmd.done).code).toBe(0);
     expect(count(s.journal, 'SIGINT')).toBe(1);
   } finally {
@@ -128,8 +122,9 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     writeFileSync(file, COUNTS(s.journal));
     // `script` runs the line in a session of its own on a pty, in the pty's foreground group.
     // The wrapper's stdin is not the terminal: only the foreground check tells it Ctrl-C has come.
-    const line = `${[process.execPath, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
-    const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv('run-ctrl-c', 2), stdio: 'pipe', detached: true }));
+    const spied = join(s.dir, 'spy');
+    const line = `${[process.execPath, '--import', SPY, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
+    const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv('run-ctrl-c', 2, { KILL_SPY: spied }), stdio: 'pipe', detached: true }));
     const pid = await pidOf(s.journal, 'command');
     expect(pid).toBeGreaterThan(0);
     const f = readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '').split(' ');
@@ -140,7 +135,11 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     // then the wrapper.
     process.kill(pid, 'SIGINT');
     expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
-    interruptThenEnd(wrapper);
+    process.kill(wrapper, 'SIGINT');
+    // The wrapper's handlers have run; what they sent is in the spy's journal before this line.
+    expect(await lineIn(spied, 'SIGINT handled', 10_000)).toBe(true);
+    expect(readFileSync(spied, 'utf8').split('\n')).not.toContain(`kill ${pid} SIGINT`);
+    process.kill(wrapper, 'SIGTERM');
     expect(await gone(pid)).toBe(true);
     expect(count(s.journal, 'SIGINT')).toBe(1);
     term.stdin!.end();

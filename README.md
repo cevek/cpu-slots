@@ -80,10 +80,11 @@ its slots are held until it ends.
   the wrapper, the command and all it runs that stayed in the group. A `kill -9` to the wrapper's pid
   alone cannot be passed on and leaves the command running: it is in the caller's group, and the kill
   of that group takes it.
-- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone, which ends its own children — as
-  with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to `node --test` as SIGTERM: the runner ends its
-  test files on SIGTERM, but dies of a SIGHUP and leaves them running. Sent to the whole group, a
-  signal reaches the command from the sender and again from the wrapper.
+- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone; what becomes of its children is
+  the command's, as with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to `node --test` as SIGTERM:
+  the runner ends its test files on SIGTERM, but dies of a SIGHUP and leaves them running. Sent to the
+  whole group, a signal may reach the command twice: from the sender, and from the wrapper unless the
+  command has exited by then.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
   forced exit with no cleanup to vitest and npm.
