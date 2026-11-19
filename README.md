@@ -62,7 +62,7 @@ run, with a width:
 
 ```sh
 cpu-slots-run --max 4 -- eslint . --concurrency {slots}
-cpu-slots-run --max 4 -- tsgo --checkers {slots}
+cpu-slots-run --max 4 -- env GOMAXPROCS={slots} tsgo
 cpu-slots-run -- eslint src test        # single-threaded: one slot
 ```
 
@@ -70,9 +70,20 @@ cpu-slots-run -- eslint src test        # single-threaded: one slot
 hands their number to the command: every `{slots}` in its arguments, and `CPU_SLOTS_WIDTH`. The width is
 fixed at the start — one that started on a busy machine stays narrow. The command runs in a process
 group of its own, a signal to the wrapper reaches the whole group, its exit code passes through, and its
-slots are held until it ends. With no pool (not Linux, `CPU_SLOTS=0`) or inside an ancestor's slot it
-takes none, and the width is `--max`. Linting has no timeouts to break: what this buys is that its CPU
-counts, and the tests running in slots beside it are not stretched by it.
+slots are held until it ends; what it leaves running in its group goes with it. The group is a session
+of its own, with no terminal: not for commands that prompt.
+
+- **Width without a slot**: inside an ancestor's slot of the pool it takes none and the width is 1 (the
+  ancestor holds one slot for its whole tree); with no pool (not Linux, `CPU_SLOTS=0`) or past the
+  wait's ceiling it takes none and the width is `--max`.
+- **A command with no width knob** (`vite build`, `knip`): `--max` is what it reserves; its own
+  parallelism stays as it is.
+- **Wide and narrow side by side**: a wide command takes what is free when it starts — under steady load
+  that may be one slot, and on an idle machine a `--max` as large as the pool takes all of it for the
+  run. There is no queue among waiters.
+
+Linting has no timeouts to break: what this buys is that its CPU counts, and the tests running in slots
+beside it are not stretched by it.
 
 If a run used to go through `cpu-mutex` (one heavy run at a time), drop that wrapper from the test
 command: it would queue whole runs again, tail and all.

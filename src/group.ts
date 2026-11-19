@@ -4,7 +4,9 @@ import { constants } from 'node:os';
 /**
  * Runs `command` in a process group of its own and exits this process with its code (a signal as
  * 128+n). A signal to this process goes to the whole group: the command alone may exit on it and
- * leave its own children running — holding their slots.
+ * leave its own children running — holding their slots. What the command leaves running in its group
+ * when it exits goes with it: this process's slots go when it exits, and nothing of the command may
+ * run on outside them. The group is a session of its own, with no controlling terminal: no prompts.
  */
 export function runInGroup(command: string, args: string[], env: NodeJS.ProcessEnv, name: string): void {
   const child = spawn(command, args, { stdio: 'inherit', detached: true, env });
@@ -22,6 +24,11 @@ export function runInGroup(command: string, args: string[], env: NodeJS.ProcessE
     process.exit(127);
   });
   child.on('exit', (code, signal) => {
+    try {
+      if (child.pid) process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      // Nothing of it is left.
+    }
     process.exit(signal ? 128 + (constants.signals[signal] ?? 0) : (code ?? 1));
   });
 }
