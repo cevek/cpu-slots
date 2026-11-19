@@ -89,7 +89,7 @@ its slots are held until it ends.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
   forced exit with no cleanup to vitest and npm. A Ctrl-C that comes while the wrapper is starting
-  the command, before it runs, reaches neither.
+  the command, before it runs, does not reach the command.
 - **Limits**: a command that ignores the signal keeps the wrapper and its slots until it exits. What a
   command leaves running when it exits — on its own or on a signal — runs on.
 
