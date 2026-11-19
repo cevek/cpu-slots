@@ -5,4 +5,5 @@
 import { runInGroup } from './group.js';
 
 const register = new URL('./register.js', import.meta.url).href;
-runInGroup(process.execPath, ['--import', register, ...process.argv.slice(2)], process.env, 'cpu-slots-node');
+// `node --test` ends its file processes on SIGTERM, not on SIGHUP: it dies of that one, and they run on.
+runInGroup(process.execPath, ['--import', register, ...process.argv.slice(2)], process.env, 'cpu-slots-node', { SIGHUP: 'SIGTERM' });

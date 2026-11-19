@@ -49,7 +49,7 @@ export function holder(env: NodeJS.ProcessEnv, mode: 'hold' | 'nest' | 'cluster'
 }
 
 /** A zombie is dead: under a PID 1 that reaps nothing (a container), `kill(pid, 0)` still succeeds. */
-export function isAlive(pid: number): boolean {
+function isAlive(pid: number): boolean {
   if (!linux) {
     try {
       process.kill(pid, 0);

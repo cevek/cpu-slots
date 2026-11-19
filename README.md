@@ -74,32 +74,21 @@ argument would be gone before the wrapper sees it. The width is fixed at the sta
 on a busy machine stays narrow.
 
 The command runs in the wrapper's process group, with its terminal: its exit code passes through, and
-its slots are held until it ends. A kill of the caller's group (an agent tool's timeout,
-`kill -- -pgid`, a SIGKILL included) takes the command with the wrapper, and what of its tree is still
-in that group.
+its slots are held until it ends.
 
-- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux with a `/proc`
-  of the wrapper's own pid namespace; elsewhere to the command alone, and nothing below is noted or
-  killed; processes `hidepid` hides from the wrapper get nothing beyond the command). Below a live
-  nested wrapper they go to that wrapper alone, and it passes them on: one delivery each from an
-  addressed signal (a process orphaned there may get it from both). Sent to the whole group (outside
-  a terminal's foreground for SIGINT), they may reach a process more than once, nested wrappers
-  each passing on what they got.
+- **A kill of the caller's group** (an agent tool's timeout, `kill -- -pgid`) or of its cgroup takes
+  the wrapper, the command and all it runs that stayed in the group. A `kill -9` to the wrapper's pid
+  alone cannot be passed on and leaves the command running: it is in the caller's group, and the kill
+  of that group takes it.
+- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone, which ends its own children — as
+  with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to `node --test` as SIGTERM: the runner ends its
+  test files on SIGTERM, but dies of a SIGHUP and leaves them running. Sent to the whole group, a
+  signal reaches the command from the sender and again from the wrapper.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
   forced exit with no cleanup to vitest and npm.
-- **A SIGKILL to the wrapper's pid alone** cannot be passed on: the command runs on. A kill of the
-  group (or of the cgroup) takes it.
-- **A cancel is total** (Linux): the wrapper notes the command's tree every second, and every 100 ms
-  from its first signal on. If the wrapper got a signal or the command died of one, what of the tree
-  still runs when the command exits gets SIGKILL — a nested wrapper's command, a child forked in a
-  signal handler, a child left by a command a group's Ctrl-C ended first. A noted pid gets a signal
-  only under the start time it was noted with. The wrapper's process title is `cpu-slots-run: <command>`
-  (`cpu-slots-node: …`): by it an outer wrapper knows a nested one, and a process that takes such a
-  title is taken for one.
-- **Limits of that**: a process forked and left behind between two notes (under 100 ms after a signal,
-  under a second before one) runs on. A command that ignores SIGTERM keeps the wrapper and its slots
-  until it exits or gets a SIGKILL. A command that exits on its own leaves what it started running.
+- **Limits**: a command that ignores the signal keeps the wrapper and its slots until it exits. What a
+  command leaves running when it exits — on its own or on a signal — runs on.
 
 - **Width without a slot**: inside an ancestor's slot of the pool it takes none and the width is 1 (the
   ancestor holds one slot for its whole tree); with no pool (not Linux, `CPU_SLOTS=0`) or past the
@@ -175,7 +164,6 @@ process and nothing is held.
 | `CPU_SLOTS_WIDTH`| set by `cpu-slots-run` for its command: the slots it took                                |
 | `CPU_SLOTS_POOL` | the pool's name (`[A-Za-z0-9_.-]`, up to 64), default `default`; pools never contend     |
 | `CPU_SLOTS_HELD` | set for a holder's children; the pools an ancestor holds a slot of                       |
-| `CPU_SLOTS_TRACE`| a file: a wrapper appends `<pid> noted <pids>` per note of the tree, `<pid> <SIG> sent <pids>` per signal it gets |
 
 ## What it does not cover
 
@@ -186,8 +174,8 @@ process and nothing is held.
 - **One network namespace**: abstract names live in a network namespace. Processes of one namespace
   share the pool; a container has its own.
 - **Escaped descendants**: a holder's descendant that left its process group and outlives it runs on
-  without a slot. What a `cpu-slots-run` / `cpu-slots-node` command leaves running when it exits on its
-  own runs on: the wrapper's slots go free, and a descendant that took a slot of its own keeps it.
+  without a slot. What a `cpu-slots-run` / `cpu-slots-node` command leaves running when it exits runs
+  on: the wrapper's slots go free, and a descendant that took a slot of its own keeps it.
 
 ## API
 
