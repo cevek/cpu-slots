@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { killAll, linux, poolEnv, repo, run } from './support/procs.ts';
 
@@ -36,46 +38,55 @@ const PACKED = packed();
 
 // `src` alone: a clone the rollout made, no build. Both outside node_modules: a checkout whose dist/
 // may be stale — it must take src. The tarball: a published install. The tarball and src under
-// node_modules: a git install, where node strips no types — it must take dist.
+// node_modules: a copy of the whole repo as a dependency (vendored, injected), where node strips no
+// types — it must take dist.
 const LAYOUTS = [
-  { kind: 'a clone with no build', under: 'clone', paths: ['package.json', 'bin', 'src'], register: /src\/register\.ts/ },
-  { kind: 'a checkout with a stale build', under: 'checkout', paths: ['package.json', 'bin', 'src', 'dist'], stale: true, register: /src\/register\.ts/ },
-  { kind: 'a published install', under: 'published', paths: PACKED, register: /dist\/register\.js/ },
-  { kind: 'source and build under node_modules', under: 'node_modules/cpu-slots', paths: [...PACKED, 'src'], register: /dist\/register\.js/ },
+  { kind: 'a clone with no build', under: 'clone', paths: ['package.json', 'bin', 'src'], register: 'src/register.ts' },
+  { kind: 'a checkout with a stale build', under: 'checkout', paths: ['package.json', 'bin', 'src', 'dist'], stale: true, register: 'src/register.ts' },
+  { kind: 'a published install', under: 'published', paths: PACKED, register: 'dist/register.js' },
+  { kind: 'source and build under node_modules', under: 'node_modules/cpu-slots', paths: [...PACKED, 'src'], register: 'dist/register.js' },
 ];
+
+/** A dir outside the copy and the repo to run in: paths resolved from the cwd find nothing there. */
+const elsewhere = () => mkdtempSync(join(tmpdir(), 'cpu-slots-bins-'));
 
 for (const l of LAYOUTS) {
   describe(l.kind, () => {
     it('cpu-slots-run runs its command with its width and passes its exit code on', async () => {
       const dir = layout(l.under, l.paths, l.stale);
+      const cwd = elsewhere();
       try {
         const r = await run(
           [command(dir, 'cpu-slots-run'), '--max', '3', '--', process.execPath, '-e', "console.log('width ' + process.env.CPU_SLOTS_WIDTH); process.exit(7)"],
           poolEnv('bins', 0),
+          cwd,
         );
         expect(r.code, r.out).toBe(7);
         expect(r.out.trim()).toBe('width 3');
       } finally {
         rmSync(dir, { recursive: true, force: true });
+        rmSync(cwd, { recursive: true, force: true });
       }
     });
 
     it('cpu-slots-node runs node --test with the preload beside it, which takes a slot', async () => {
       const dir = layout(l.under, l.paths, l.stale);
+      const cwd = elsewhere();
       try {
-        const file = join(dir, 'a.test.mjs');
+        const file = join(cwd, 'a.test.mjs');
         writeFileSync(
           file,
           // The runner hands its `--import` on to the file's process as `--import=<url>`.
           "import { test } from 'node:test';\nimport assert from 'node:assert';\ntest('preload', () => {\n  const a = process.execArgv;\n  const i = a.findIndex((x) => x === '--import' || x.startsWith('--import='));\n  assert.ok(i >= 0, 'no --import: ' + a.join(' '));\n  console.log('PRELOAD ' + (a[i] === '--import' ? a[i + 1] : a[i].slice('--import='.length)));\n  console.log('HELD ' + process.env.CPU_SLOTS_HELD);\n});\n",
         );
         const env = poolEnv('bins', 2);
-        const r = await run([command(dir, 'cpu-slots-node'), '--test', file], env);
+        const r = await run([command(dir, 'cpu-slots-node'), '--test', file], env, cwd);
         expect(r.code, r.out).toBe(0);
-        expect(r.out).toMatch(new RegExp('PRELOAD \\S*' + l.register.source));
+        expect(/PRELOAD (\S+)/.exec(r.out)?.[1], r.out).toBe(pathToFileURL(join(realpathSync(dir), l.register)).href);
         if (linux) expect(r.out).toMatch(new RegExp(`HELD \\S*${env['CPU_SLOTS_POOL']}`));
       } finally {
         rmSync(dir, { recursive: true, force: true });
+        rmSync(cwd, { recursive: true, force: true });
       }
     });
   });

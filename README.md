@@ -16,6 +16,9 @@ Linux only. Everywhere else the package is a no-op.
 npm i -D cpu-slots
 ```
 
+From the registry: a dependency on the git URL comes without a build (`dist/` is not in git), and
+both its import and its commands fail.
+
 ## Use
 
 **vitest** (4.1 or later; node pools — `forks`, `threads`):
