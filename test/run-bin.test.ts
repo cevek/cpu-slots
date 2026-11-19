@@ -153,6 +153,19 @@ it.runIf(linux)('what the command forks in its SIGTERM handler goes with it: the
   }
 });
 
+it.runIf(linux)('a trace path that is a FIFO with no reader is no trace: the wrapper does not block on it', async () => {
+  const s = scratch('run-trace-fifo');
+  try {
+    const fifo = join(s.dir, 'fifo');
+    expect(spawnSync('mkfifo', [fifo]).status).toBe(0);
+    // Lives past the wrapper's first note, which would open the FIFO.
+    const r = await run([RUN, '--', process.execPath, '-e', 'setTimeout(() => {}, 1500)'], poolEnv('run-trace-fifo', 2, { CPU_SLOTS_TRACE: fifo }), repo, 15_000);
+    expect(r.code, r.out).toBe(0);
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
 it.runIf(linux)('after a signal the wrapper notes the tree every 100 ms, not every second', async () => {
   const s = scratch('run-rescan-rate');
   const trace = join(s.dir, 'trace');
