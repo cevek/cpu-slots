@@ -171,6 +171,7 @@ process and nothing is held.
 | `CPU_SLOTS_WIDTH`| set by `cpu-slots-run` for its command: the slots it took                                |
 | `CPU_SLOTS_POOL` | the pool's name (`[A-Za-z0-9_.-]`, up to 64), default `default`; pools never contend     |
 | `CPU_SLOTS_HELD` | set for a holder's children; the pools an ancestor holds a slot of                       |
+| `CPU_SLOTS_TRACE`| a file: a wrapper appends `<pid> noted <pids>` per note of the tree, `<pid> <SIG> sent <pids>` per signal it gets |
 
 ## What it does not cover
 

@@ -103,15 +103,48 @@ it.runIf(linux)("a signal to the wrapper reaches the command's whole tree, not i
   }
 });
 
+type Traced = { wrapper: number; what: string; pids: number[] };
+
+/** What wrappers wrote to `CPU_SLOTS_TRACE`: `<pid> noted <pids>`, `<pid> <SIG> sent <pids>`. */
+function traceOf(file: string): Traced[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split(' ');
+      const pids = parts.at(-1)!.split(',').filter(Boolean).map(Number);
+      return { wrapper: Number(parts[0]), what: parts.slice(1, -1).join(' '), pids };
+    });
+}
+
+/** Resolves once the trace holds a line `match` takes: a wait on what the wrapper did, not on a clock. */
+async function traced(file: string, match: (t: Traced) => boolean, ms = 10_000): Promise<boolean> {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (traceOf(file).some(match)) return true;
+    if (Date.now() >= until) return false;
+    await pause(50);
+  }
+}
+
+/** How many times wrappers sent `sig` to `pid`. */
+const sends = (file: string, sig: string, pid: number) => traceOf(file).filter((t) => t.what === `${sig} sent` && t.pids.includes(pid)).length;
+
 it.runIf(linux)('what the command forks in its SIGTERM handler goes with it: the noted tree grows until the command exits', async () => {
   const s = scratch('run-fork-on-term');
+  const trace = join(s.dir, 'trace');
+  const stop = join(s.dir, 'stop');
   try {
-    // The fork comes after the SIGTERM went out, so it never gets one; the command lives on past a rescan.
-    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} process.on('SIGTERM', () => { const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(s.journal)}], { stdio: 'ignore' }); c.unref(); say('pid forked ' + c.pid); setTimeout(() => process.exit(0), 700); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-fork-on-term', 2));
+    // The fork comes after the SIGTERM went out, so it never gets one; the command exits once the
+    // wrapper has noted the fork, and only a later note can have.
+    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} process.on('SIGTERM', () => { const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(s.journal)}], { stdio: 'ignore' }); c.unref(); say('pid forked ' + c.pid); setInterval(() => require('fs').existsSync(${JSON.stringify(stop)}) && process.exit(0), 20); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-fork-on-term', 2, { CPU_SLOTS_TRACE: trace }));
     expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
     process.kill(cmd.pid, 'SIGTERM');
     const pid = await pidOf(s.journal, 'forked', 10_000);
     expect(pid).toBeGreaterThan(0);
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'noted' && t.pids.includes(pid))).toBe(true);
+    writeFileSync(stop, '');
     expect((await cmd.done).code).toBe(0);
     expect(await gone(pid)).toBe(true);
   } finally {
@@ -135,46 +168,50 @@ it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to th
   }
 });
 
-// Counts its signals and exits a while after the first, time enough for a second to come.
+// Says each `sig` it gets; on SIGUSR2 says `probe` and exits. Standard signals pending together are
+// delivered lowest number first: once `probe` is said, every `sig` sent before it has been said too.
 const counts = (journal: string, sig: string) =>
-  `${sayTo(journal)} process.on('${sig}', () => { say('${sig}'); setTimeout(() => process.exit(0), 500); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
+  `${sayTo(journal)} process.on('${sig}', () => say('${sig}')); process.on('SIGUSR2', () => { say('probe'); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
 
-it('a SIGTERM to the wrapper reaches the command', async () => {
-  const s = scratch('run-sigterm');
-  try {
-    const cmd = start([RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGTERM')], poolEnv('run-sigterm', 0));
-    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
-    process.kill(cmd.pid, 'SIGTERM');
-    expect((await cmd.done).code).toBe(0);
-    expect(count(s.journal, 'SIGTERM')).toBe(1);
-  } finally {
-    killPids(s.journal);
-    rmSync(s.dir, { recursive: true, force: true });
-  }
-});
+/** Sends the probe and waits for the command to end on it. */
+async function probe(pid: number, done: Promise<{ code: number | null }>): Promise<number | null> {
+  process.kill(pid, 'SIGUSR2');
+  return (await done).code;
+}
 
-it('a SIGINT to the wrapper alone, with no terminal, reaches the command once', async () => {
-  const s = scratch('run-sigint');
-  try {
-    const cmd = start([RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGINT')], poolEnv('run-sigint', 0));
-    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
-    process.kill(cmd.pid, 'SIGINT');
-    expect((await cmd.done).code).toBe(0);
-    expect(count(s.journal, 'SIGINT')).toBe(1);
-  } finally {
-    killPids(s.journal);
-    rmSync(s.dir, { recursive: true, force: true });
-  }
-});
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  it(`a ${sig} to the wrapper alone, with no terminal, is sent to the command once and reaches it once`, async () => {
+    const s = scratch(`run-${sig}`);
+    const trace = join(s.dir, 'trace');
+    try {
+      const cmd = start([RUN, '--', process.execPath, '-e', counts(s.journal, sig)], poolEnv(`run-${sig}`, 0, { CPU_SLOTS_TRACE: trace }));
+      const pid = await pidOf(s.journal, 'command');
+      expect(pid).toBeGreaterThan(0);
+      process.kill(cmd.pid, sig);
+      expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === `${sig} sent`)).toBe(true);
+      expect(await probe(pid, cmd.done)).toBe(0);
+      expect(sends(trace, sig, pid)).toBe(1);
+      expect(count(s.journal, sig)).toBe(1);
+    } finally {
+      killPids(s.journal);
+      rmSync(s.dir, { recursive: true, force: true });
+    }
+  });
+}
 
-it.runIf(linux)('a SIGINT to the outer of two nested wrappers reaches the command once: below the inner one, the inner one passes it on', async () => {
+it.runIf(linux)('a SIGINT to the outer of two nested wrappers is sent to the command once: below the inner one, the inner one passes it on', async () => {
   const s = scratch('run-nested-sigint');
+  const trace = join(s.dir, 'trace');
   try {
-    const cmd = start([RUN, '--', process.execPath, RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGINT')], poolEnv('run-nested-sigint', 2));
+    const cmd = start([RUN, '--', process.execPath, RUN, '--', process.execPath, '-e', counts(s.journal, 'SIGINT')], poolEnv('run-nested-sigint', 2, { CPU_SLOTS_TRACE: trace }));
     const pid = await pidOf(s.journal, 'command');
     expect(pid).toBeGreaterThan(0);
     process.kill(cmd.pid, 'SIGINT');
-    expect((await cmd.done).code).toBe(0);
+    // Both wrappers have passed it on: the outer one, and the inner one it went to.
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'SIGINT sent')).toBe(true);
+    expect(await traced(trace, (t) => t.wrapper !== cmd.pid && t.what === 'SIGINT sent')).toBe(true);
+    expect(await probe(pid, cmd.done)).toBe(0);
+    expect(sends(trace, 'SIGINT', pid)).toBe(1);
     expect(count(s.journal, 'SIGINT')).toBe(1);
   } finally {
     killPids(s.journal);
@@ -184,19 +221,23 @@ it.runIf(linux)('a SIGINT to the outer of two nested wrappers reaches the comman
 
 it.runIf(linux)('below a nested wrapper killed alone, the outer one passes signals on itself again', async () => {
   const s = scratch('run-dead-inner');
+  const trace = join(s.dir, 'trace');
   try {
-    const inner = `${sayTo(s.journal)} say('pid inner ' + process.ppid); ${counts(s.journal, 'SIGTERM').replace(sayTo(s.journal), '')}`;
+    const inner = `${sayTo(s.journal)} say('pid inner ' + process.ppid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
     // sh stays the outer one's command after the inner wrapper is gone.
-    const cmd = start([RUN, '--', '/bin/sh', '-c', `"$0" "$1" -- "$2" -e "$3"; sleep 1000`, process.execPath, RUN, process.execPath, inner], poolEnv('run-dead-inner', 2));
+    const cmd = start([RUN, '--', '/bin/sh', '-c', `"$0" "$1" -- "$2" -e "$3"; sleep 1000`, process.execPath, RUN, process.execPath, inner], poolEnv('run-dead-inner', 2, { CPU_SLOTS_TRACE: trace }));
     const wrapper = await pidOf(s.journal, 'inner');
-    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
-    // Past the outer one's note of every second: it has the inner wrapper above the command.
-    await pause(1_500);
+    const pid = await pidOf(s.journal, 'command');
+    expect(wrapper * pid).toBeGreaterThan(0);
+    // The outer one has noted the command under the inner wrapper.
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'noted' && t.pids.includes(pid) && t.pids.includes(wrapper))).toBe(true);
     process.kill(wrapper, 'SIGKILL');
     expect(await gone(wrapper)).toBe(true);
     process.kill(cmd.pid, 'SIGTERM');
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'SIGTERM sent')).toBe(true);
+    expect(sends(trace, 'SIGTERM', pid)).toBe(1);
     await cmd.done;
-    expect(count(s.journal, 'SIGTERM')).toBe(1);
+    expect(await gone(pid)).toBe(true);
   } finally {
     killPids(s.journal);
     rmSync(s.dir, { recursive: true, force: true });
@@ -205,13 +246,14 @@ it.runIf(linux)('below a nested wrapper killed alone, the outer one passes signa
 
 it.runIf(linux)('a command that dies of a signal not from the wrapper takes the tree noted before: a group Ctrl-C may end it first', async () => {
   const s = scratch('run-died');
+  const trace = join(s.dir, 'trace');
   try {
-    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(s.journal)}], { stdio: 'ignore' }); say('pid child ' + c.pid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-died', 2));
+    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(s.journal)}], { stdio: 'ignore' }); say('pid child ' + c.pid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-died', 2, { CPU_SLOTS_TRACE: trace }));
     const pid = await pidOf(s.journal, 'command');
     const kid = await pidOf(s.journal, 'child');
     expect(pid * kid).toBeGreaterThan(0);
-    // Past the wrapper's note of every second; the wrapper itself gets no signal.
-    await pause(1_500);
+    // The wrapper's own note, with no signal to it.
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'noted' && t.pids.includes(kid))).toBe(true);
     process.kill(pid, 'SIGKILL');
     expect((await cmd.done).code).toBe(137);
     expect(await gone(kid)).toBe(true);
@@ -225,6 +267,7 @@ const hasScript = linux && spawnSync('script', ['--version']).status === 0;
 
 it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the command once: the wrapper does not pass it on", async () => {
   const s = scratch('run-ctrl-c');
+  const trace = join(s.dir, 'trace');
   try {
     // `.cjs`: the package is ESM, and the command uses `require`.
     const file = join(s.dir, 'command.cjs');
@@ -232,16 +275,22 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     // `script` runs the line in a session of its own on a pty, in the pty's foreground group.
     // The wrapper's stdin is not the terminal: only the foreground check tells it Ctrl-C has come.
     const line = `${[process.execPath, RUN, '--', process.execPath, file].map(q).join(' ')} < /dev/null`;
-    const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv('run-ctrl-c', 2), stdio: 'pipe', detached: true }));
+    const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv('run-ctrl-c', 2, { CPU_SLOTS_TRACE: trace }), stdio: 'pipe', detached: true }));
     const pid = await pidOf(s.journal, 'command');
     expect(pid).toBeGreaterThan(0);
     const f = readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '').split(' ');
-    const [pgrp, tty, tpgid] = [Number(f[2]), Number(f[4]), Number(f[5])];
+    const [wrapper, pgrp, tty, tpgid] = [Number(f[1]), Number(f[2]), Number(f[4]), Number(f[5])];
     expect(tty).not.toBe(0);
     expect(tpgid).toBe(pgrp);
-    // What the terminal does on Ctrl-C.
-    process.kill(-pgrp, 'SIGINT');
+    // Ctrl-C sends SIGINT to every process of the group; here one at a time, each one handled before
+    // the next: first the command, then the wrapper.
+    process.kill(pid, 'SIGINT');
+    expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
+    process.kill(wrapper, 'SIGINT');
+    expect(await traced(trace, (t) => t.wrapper === wrapper && t.what === 'SIGINT sent')).toBe(true);
+    process.kill(pid, 'SIGUSR2');
     expect(await gone(pid)).toBe(true);
+    expect(sends(trace, 'SIGINT', pid)).toBe(0);
     expect(count(s.journal, 'SIGINT')).toBe(1);
     term.stdin!.end();
   } finally {

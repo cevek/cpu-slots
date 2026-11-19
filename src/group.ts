@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isatty } from 'node:tty';
 
@@ -107,15 +107,30 @@ function tree(roots: Noted[], exact: boolean): Noted[] {
   return out;
 }
 
-/** `sig` to each of `procs` still running under the same pid and start time, read just before. */
-export function signalLive(procs: Iterable<Proc>, sig: NodeJS.Signals): void {
+/** `sig` to each of `procs` still running under the same pid and start time, read just before; the pids it went to. */
+export function signalLive(procs: Iterable<Proc>, sig: NodeJS.Signals): number[] {
+  const sent: number[] = [];
   for (const p of procs) {
     if (!live(p)) continue;
     try {
       process.kill(p.pid, sig);
+      sent.push(p.pid);
     } catch {
       // Gone since.
     }
+  }
+  return sent;
+}
+
+// `CPU_SLOTS_TRACE=<file>`: a line per note of the tree and per signal passed on, for tests and for
+// seeing what a wrapper did.
+const traceFile = process.env['CPU_SLOTS_TRACE'];
+function trace(line: string): void {
+  if (!traceFile) return;
+  try {
+    appendFileSync(traceFile, `${process.pid} ${line}\n`);
+  } catch {
+    // Tracing never stops the wrapper.
   }
 }
 
@@ -159,6 +174,7 @@ export function runInGroup(command: string, args: string[], env: NodeJS.ProcessE
     } catch {
       // /proc unreadable now: what was noted stays.
     }
+    trace(`noted ${noted.map((p) => p.pid).join(',')}`);
   };
   let timer: NodeJS.Timeout | undefined;
   const schedule = () => {
@@ -174,16 +190,19 @@ export function runInGroup(command: string, args: string[], env: NodeJS.ProcessE
   if (procfs) schedule();
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(sig, () => {
-      if (!running()) return;
-      const pass = sig !== 'SIGINT' || !foreground();
-      if (!procfs) {
-        if (pass) child.kill(sig);
-        return;
+      const sent: number[] = [];
+      if (running()) {
+        const pass = sig !== 'SIGINT' || !foreground();
+        if (!procfs) {
+          if (pass && child.kill(sig)) sent.push(child.pid!);
+        } else {
+          signalled = true;
+          note(true);
+          schedule();
+          if (pass) sent.push(...signalLive(noted.filter((p) => !p.cover || !live(p.cover)), sig));
+        }
       }
-      signalled = true;
-      note(true);
-      schedule();
-      if (pass) signalLive(noted.filter((p) => !p.cover || !live(p.cover)), sig);
+      trace(`${sig} sent ${sent.join(',')}`);
     });
   }
   child.on('error', (err) => {
