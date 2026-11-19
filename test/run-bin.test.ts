@@ -171,7 +171,8 @@ const hasScript = linux && spawnSync('script', ['--version']).status === 0;
 it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the command once: the wrapper does not pass it on", async () => {
   const s = scratch('run-ctrl-c');
   try {
-    const file = join(s.dir, 'command.js');
+    // `.cjs`: the package is ESM, and the command uses `require`.
+    const file = join(s.dir, 'command.cjs');
     writeFileSync(file, counts(s.journal, 'SIGINT'));
     // `script` runs the line in a session of its own on a pty, in the pty's foreground group.
     const term = track(spawn('script', ['-qec', [process.execPath, RUN, '--', process.execPath, file].map(q).join(' '), '/dev/null'], { env: poolEnv('run-ctrl-c', 2), stdio: 'pipe', detached: true }));
