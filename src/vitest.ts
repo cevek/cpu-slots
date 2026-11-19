@@ -5,7 +5,7 @@
 // so a slot never stays with a worker that has no file to run.
 // The price: importing and transforming the file run outside the slot.
 import { aroundAll } from 'vitest';
-import { acquireSlot, WAIT_CEILING_MS } from './index.js';
+import { acquireSlot, WAIT_CEILING_MS } from './index.ts';
 
 const HELD = 'CPU_SLOTS_HELD';
 

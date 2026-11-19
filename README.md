@@ -35,6 +35,10 @@ export default defineConfig({
 cpu-slots-node --test "test/**/*.test.ts"
 ```
 
+In a checkout or a clone (`src/` beside them) both commands run the TypeScript source as is — Node 22.18+
+strips the types — so a clone with no build has them (a tool rolled out by claude-ui is such a clone); a
+published install runs `dist/`.
+
 `cpu-slots-node` is `node --import <cpu-slots/register by absolute URL>`. Not `--import cpu-slots/register`
 by name: a test that forks a node child with a cwd of its own hands it the same `--import`, and the name
 resolved from there is a module not found. Signals and the process group are as for `cpu-slots-run`

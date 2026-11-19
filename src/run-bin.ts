@@ -8,8 +8,8 @@
 // takes none and the width is 1: that ancestor holds one slot for its whole tree. With no pool (not
 // Linux, `CPU_SLOTS=0`, broken) or past the wait's ceiling it takes none, and the width is N —
 // unbounded by the pool, as the command was without it.
-import { runInGroup } from './group.js';
-import { acquireSlot, pool, tryAcquireSlot, type Slot } from './index.js';
+import { runInGroup } from './group.ts';
+import { acquireSlot, pool, tryAcquireSlot, type Slot } from './index.ts';
 
 const USAGE = 'usage: cpu-slots-run [--max N] [--] <command> [args...]';
 

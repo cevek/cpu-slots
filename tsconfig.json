@@ -8,6 +8,10 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
+    // The source runs as is from a checkout or a clone (bin/*.mjs): its imports name the .ts files,
+    // and the build rewrites them to the .js it emits.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "declaration": true,
