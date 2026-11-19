@@ -67,6 +67,8 @@ it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to th
     const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-group-kill', 2));
     const pid = await pidOf(s.journal, 'command');
     expect(pid).toBeGreaterThan(0);
+    // Seen alive first: a detector that cannot see it would call it dead all along.
+    expect(await gone(pid, 0)).toBe(false);
     // `start` makes the wrapper a group leader: its group is the caller's group here.
     process.kill(-cmd.pid, 'SIGKILL');
     expect(await gone(pid)).toBe(true);
@@ -135,7 +137,10 @@ async function onPty(s: { dir: string; journal: string }, background: boolean) {
   const wrapped = [process.execPath, '--import', SPY, RUN, '--', process.execPath, file].map(q).join(' ');
   // In the foreground its stdin is not the terminal, in the background it is: either way only the
   // foreground check tells where it is, not stdin.
-  const line = background ? `/bin/sh -c ${q(`set -m; ${wrapped} & wait`)}` : `${wrapped} < /dev/null`;
+  // The job's pid goes to the journal at once: killed by the test's cleanup if it fails before the
+  // command says its own (`script` and the pty's close do not reach a background job).
+  const job = `echo "pid job $!" >> ${q(s.journal)}`;
+  const line = background ? `/bin/sh -c ${q(`set -m; ${wrapped} & ${job}; wait`)}` : `${wrapped} < /dev/null`;
   const term = track(spawn('script', ['-qec', line, '/dev/null'], { env: poolEnv(`pty-${background}`, 2, { KILL_SPY: spied }), stdio: 'pipe', detached: true }));
   const pid = await pidOf(s.journal, 'command');
   expect(pid).toBeGreaterThan(0);
@@ -239,6 +244,20 @@ it.each([
   expect(r.code).toBe(2);
   expect(r.out).toMatch(problem);
   expect(r.out).not.toMatch(/width/);
+});
+
+it.each([
+  ['an empty one', ''],
+  ['one that is not there', '/nonexistent/cpu-slots-test-command'],
+])('a command it cannot start, %s, exits 127', async (_, command) => {
+  const r = await run([RUN, '--', command], poolEnv('run-127', 0));
+  expect(r.code, r.out).toBe(127);
+  expect(r.out).toMatch(/^cpu-slots-run: /m);
+});
+
+it('a command ended by a signal passes it on as 128+n', async () => {
+  const r = await run([RUN, '--', process.execPath, '-e', "process.kill(process.pid, 'SIGTERM')"], poolEnv('run-143', 0));
+  expect(r.code, r.out).toBe(143);
 });
 
 it('no command is a usage error', async () => {

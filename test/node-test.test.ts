@@ -125,6 +125,7 @@ it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test file
     const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
     const pid = await pidOf(f.journal, 'file');
     expect(pid).toBeGreaterThan(0);
+    expect(await gone(pid, 0)).toBe(false);
     // The file holds the pool's one slot: only its end frees it.
     const taken = await tryAcquireSlot(env);
     taken?.release();

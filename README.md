@@ -76,10 +76,11 @@ on a busy machine stays narrow.
 The command runs in the wrapper's process group, with its terminal: its exit code passes through, and
 its slots are held until it ends.
 
-- **A SIGKILL to the wrapper's group** (`kill -KILL -- -pgid`, an agent tool's timeout) or a kill of
-  its cgroup takes the wrapper, the command and all it runs that stayed in the group. That group is
-  the caller's, or under a job-controlling shell the job's. A `kill -9` to the wrapper's pid alone
-  cannot be passed on and leaves the command running; the kill of the group takes it.
+- **A SIGKILL to the wrapper's group** (`kill -KILL -- -pgid`, an agent tool's timeout) takes the
+  wrapper, the command and what of theirs is still in that group. That group is the caller's, or
+  under a job-controlling shell the job's. **A kill of the cgroup** (`cgroup.kill`) takes what is in
+  that cgroup's tree, whatever its group. A `kill -9` to the wrapper's pid alone cannot be passed on
+  and leaves the command running; the kill of the group takes it.
 - **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone; what becomes of its children is
   the command's, as with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to its command as SIGTERM —
   to any, not only `node --test`, the reason for it: the runner ends its test files on SIGTERM, but
