@@ -1,5 +1,6 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -85,12 +86,28 @@ export async function pidOf(journal: string, role: string, ms = 30_000): Promise
   }
 }
 
-/** SIGKILL to every pid the journal names: a failed test leaves none of its processes behind. */
+function commandLine(pid: number): string {
+  if (linux) {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    } catch {
+      return '';
+    }
+  }
+  return spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '';
+}
+
+/**
+ * SIGKILL to every pid the journal names that is still one of the test's: a failed test leaves none of
+ * its processes behind. Each has the journal's dir in its command line; a pid reused since has not.
+ */
 export function killPids(journal: string): void {
   if (!existsSync(journal)) return;
   for (const m of readFileSync(journal, 'utf8').matchAll(/^pid \S+ (\d+)$/gm)) {
+    const pid = Number(m[1]);
+    if (!commandLine(pid).includes(dirname(journal))) continue;
     try {
-      process.kill(Number(m[1]), 'SIGKILL');
+      process.kill(pid, 'SIGKILL');
     } catch {
       // Gone already.
     }

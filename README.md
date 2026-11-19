@@ -75,11 +75,12 @@ on a busy machine stays narrow.
 
 The command runs in the wrapper's process group, with its terminal: its exit code passes through, and
 its slots are held until it ends. A kill of the caller's group (an agent tool's timeout,
-`kill -- -pgid`, a SIGKILL included) takes the command with the wrapper.
+`kill -- -pgid`, a SIGKILL included) takes the command with the wrapper, and what of its tree is still
+in that group.
 
-- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux; elsewhere to the
-  command alone, and nothing below is noted or killed). Below a nested wrapper they go to that wrapper
-  alone, and it passes them on: one delivery each. Sent to the whole group (outside a terminal's
+- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux with `/proc`;
+  elsewhere to the command alone, and nothing below is noted or killed). Below a live nested wrapper
+  they go to that wrapper alone, and it passes them on: one delivery each. Sent to the whole group (outside a terminal's
   foreground for SIGINT), they reach a process twice.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
@@ -90,8 +91,8 @@ its slots are held until it ends. A kill of the caller's group (an agent tool's 
   from its first signal on. If the wrapper got a signal or the command died of one, what of the tree
   still runs when the command exits gets SIGKILL — a nested wrapper's command, a child forked in a
   signal handler, a child left by a command a group's Ctrl-C ended first. A noted pid gets a signal
-  only under the start time it was noted with. The wrapper's process title is `cpu-slots-run <command>`
-  (`cpu-slots-node …`): by it an outer wrapper knows a nested one.
+  only under the start time it was noted with. The wrapper's process title is `cpu-slots-run: <command>`
+  (`cpu-slots-node: …`): by it an outer wrapper knows a nested one.
 - **Limits of that**: a process forked and left behind between two notes (under 100 ms after a signal,
   under a second before one) runs on. A command that ignores SIGTERM keeps the wrapper and its slots
   until it exits or gets a SIGKILL. A command that exits on its own leaves what it started running.
@@ -180,8 +181,8 @@ process and nothing is held.
 - **One network namespace**: abstract names live in a network namespace. Processes of one namespace
   share the pool; a container has its own.
 - **Escaped descendants**: a holder's descendant that left its process group and outlives it runs on
-  without a slot; so does what a `cpu-slots-run` / `cpu-slots-node` command leaves running when it
-  exits on its own.
+  without a slot. What a `cpu-slots-run` / `cpu-slots-node` command leaves running when it exits on its
+  own runs on: the wrapper's slots go free, and a descendant that took a slot of its own keeps it.
 
 ## API
 

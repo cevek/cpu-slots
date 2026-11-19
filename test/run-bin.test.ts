@@ -88,7 +88,8 @@ it.runIf(linux)("a signal to the wrapper reaches the command's whole tree, not i
   try {
     // The leader ignores SIGHUP; its child says it got one, and only then do both end.
     const child = `${sayTo(s.journal)} process.on('SIGHUP', () => { say('child got SIGHUP'); process.exit(0); }); say('pid child ' + process.pid); setInterval(() => {}, 1000);`;
-    const leader = `${sayTo(s.journal)} process.on('SIGHUP', () => {}); say('pid leader ' + process.pid); const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(child)}], { stdio: 'inherit' }); c.on('exit', () => process.exit(0));`;
+    // A title that starts like a wrapper's: no wrapper, so the signal goes below it all the same.
+    const leader = `${sayTo(s.journal)} process.title = 'cpu-slots-runner'; process.on('SIGHUP', () => {}); say('pid leader ' + process.pid); const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(child)}], { stdio: 'inherit' }); c.on('exit', () => process.exit(0));`;
     const cmd = start([RUN, '--', process.execPath, '-e', leader], poolEnv('run-signal', 2));
     const pid = await pidOf(s.journal, 'child');
     expect(pid).toBeGreaterThan(0);
@@ -106,7 +107,7 @@ it.runIf(linux)('what the command forks in its SIGTERM handler goes with it: the
   const s = scratch('run-fork-on-term');
   try {
     // The fork comes after the SIGTERM went out, so it never gets one; the command lives on past a rescan.
-    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} process.on('SIGTERM', () => { const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); c.unref(); say('pid forked ' + c.pid); setTimeout(() => process.exit(0), 400); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-fork-on-term', 2));
+    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} process.on('SIGTERM', () => { const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(s.journal)}], { stdio: 'ignore' }); c.unref(); say('pid forked ' + c.pid); setTimeout(() => process.exit(0), 700); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-fork-on-term', 2));
     expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
     process.kill(cmd.pid, 'SIGTERM');
     const pid = await pidOf(s.journal, 'forked', 10_000);
@@ -181,10 +182,31 @@ it.runIf(linux)('a SIGINT to the outer of two nested wrappers reaches the comman
   }
 });
 
+it.runIf(linux)('below a nested wrapper killed alone, the outer one passes signals on itself again', async () => {
+  const s = scratch('run-dead-inner');
+  try {
+    const inner = `${sayTo(s.journal)} say('pid inner ' + process.ppid); ${counts(s.journal, 'SIGTERM').replace(sayTo(s.journal), '')}`;
+    // sh stays the outer one's command after the inner wrapper is gone.
+    const cmd = start([RUN, '--', '/bin/sh', '-c', `"$0" "$1" -- "$2" -e "$3"; sleep 1000`, process.execPath, RUN, process.execPath, inner], poolEnv('run-dead-inner', 2));
+    const wrapper = await pidOf(s.journal, 'inner');
+    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
+    // Past the outer one's note of every second: it has the inner wrapper above the command.
+    await pause(1_500);
+    process.kill(wrapper, 'SIGKILL');
+    expect(await gone(wrapper)).toBe(true);
+    process.kill(cmd.pid, 'SIGTERM');
+    await cmd.done;
+    expect(count(s.journal, 'SIGTERM')).toBe(1);
+  } finally {
+    killPids(s.journal);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
 it.runIf(linux)('a command that dies of a signal not from the wrapper takes the tree noted before: a group Ctrl-C may end it first', async () => {
   const s = scratch('run-died');
   try {
-    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); say('pid child ' + c.pid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-died', 2));
+    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(s.journal)}], { stdio: 'ignore' }); say('pid child ' + c.pid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-died', 2));
     const pid = await pidOf(s.journal, 'command');
     const kid = await pidOf(s.journal, 'child');
     expect(pid * kid).toBeGreaterThan(0);
