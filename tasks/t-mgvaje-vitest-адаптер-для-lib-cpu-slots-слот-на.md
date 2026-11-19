@@ -1,7 +1,7 @@
 ---
 id: t-mgvaje
 title: 'vitest-адаптер для @lib/cpu-slots: слот на тест-файл через setupFiles'
-status: review
+status: done
 priority: medium
 author: mb-e214488f
 assignee: mb-e214488f

@@ -1,7 +1,7 @@
 ---
 id: t-n0kakw
 title: 'cpu-slots-run: слоты на весь прогон тяжёлой команды с шириной (ESLint, tsgo, сборки)'
-status: review
+status: done
 priority: medium
 author: mb-e214488f
 assignee: mb-e214488f

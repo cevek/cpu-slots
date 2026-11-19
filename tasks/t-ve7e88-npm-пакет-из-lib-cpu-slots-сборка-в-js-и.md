@@ -1,7 +1,7 @@
 ---
 id: t-ve7e88
 title: 'npm-пакет из @lib/cpu-slots: сборка в JS и публичный вход preload для node --test'
-status: review
+status: done
 priority: medium
 author: mb-e214488f
 assignee: mb-e214488f
@@ -63,3 +63,7 @@ created: '2026-11-19T02:30:17.301Z'
 - bug-reviewer, круг 2 (последний): 2 [BLOCK] — `SIGHUP` обёртке оставлял тест-файлы со слотами (своя группа процессов и сигнал группе), пустые проверки отсутствия при `lineIn(…, 0)` — закрыты без нового круга; 3 should-fix (группы процессов в тестах, `close` вместо `exit`, свежий пустой слот) — закрыты.
 - Мутациями на Linux проверено, что тесты ловят: пару хуков вместо `aroundAll`, глобальный `setTimeout` в ядре, отсутствие таймаута хука, отсутствие `finally`, адаптер и preload без захвата, сигнал только раннеру.
 - Npm 10.9.4 из `/usr/local/bin` падает на установке этого репо (`edgesOut`), npm 11 из Homebrew ставит.
+
+
+## Опубликовано
+`cpu-slots@0.1.0` в npm (юзер), с `main` @ `caea3d5`: ядро, `cpu-slots/vitest`, `cpu-slots/register`, бинари `cpu-slots-node` и `cpu-slots-run`. claude-ui перешёл на зависимость (`run-suites.mjs`), `libs/cpu-slots` там удалён.
