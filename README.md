@@ -77,14 +77,21 @@ The command runs in the wrapper's process group, with its terminal: its exit cod
 its slots are held until it ends. A kill of the caller's group (an agent tool's timeout,
 `kill -- -pgid`, a SIGKILL included) takes the command with the wrapper.
 
-- **SIGTERM, SIGHUP** to the wrapper go to the command's whole tree (on Linux; elsewhere to the command
-  alone). Sent to the whole group, a process gets two.
-- **SIGINT** is not passed on: Ctrl-C reaches the whole foreground group anyway, and a second one is a
-  forced exit with no cleanup to vitest and npm. A SIGINT to the wrapper's pid alone does not reach
-  the command.
-- **A cancel is total** (Linux): on any of the three the wrapper notes the command's tree, and what of it
-  still runs when the command exits gets SIGKILL — a nested wrapper's command, one that ignores
-  SIGTERM. A command that exits with no signal leaves what it started running.
+- **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux; elsewhere to the
+  command alone, and nothing below is noted or killed). Sent to the whole group, SIGTERM and SIGHUP
+  reach a process twice.
+- **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
+  Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
+  forced exit with no cleanup to vitest and npm.
+- **A SIGKILL to the wrapper's pid alone** cannot be passed on: the command runs on. A kill of the
+  group (or of the cgroup) takes it.
+- **A cancel is total** (Linux): from the first signal on the wrapper notes the command's tree, again
+  every 100 ms, and what of it still runs when the command exits gets SIGKILL — a nested wrapper's
+  command, a child forked in a signal handler. A noted pid gets a signal only under the start time it
+  was noted with.
+- **Limits of that**: a process forked and left behind between two notes (under 100 ms) runs on. A
+  command that ignores SIGTERM keeps the wrapper and its slots until it exits or gets a SIGKILL. A
+  command that exits with no signal to the wrapper leaves what it started running.
 
 - **Width without a slot**: inside an ancestor's slot of the pool it takes none and the width is 1 (the
   ancestor holds one slot for its whole tree); with no pool (not Linux, `CPU_SLOTS=0`) or past the

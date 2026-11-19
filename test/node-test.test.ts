@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { hasLine, holder, killAll, lineIn, linux, oneAtATime, poolEnv, repo, run, start, within } from './support/procs.ts';
+import { gone, hasLine, holder, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
 
 
 afterEach(killAll);
@@ -76,36 +76,40 @@ it.runIf(linux && nodeMajor >= 24)('`--test-timeout` does not count the wait for
   }
 });
 
+// A test file that says its pid and waits a minute; on SIGHUP it says so and exits.
+const waits = `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\nprocess.on('SIGHUP', () => { appendFileSync(JOURNAL, 'got SIGHUP\\n'); process.exit(1); });\ntest('a', async () => {\n  appendFileSync(JOURNAL, 'pid file ' + process.pid + '\\n');\n  await new Promise((r) => setTimeout(r, 60_000));\n});\n`;
+
 it.runIf(linux)('a signal to `cpu-slots-node` reaches the test files: the slot one held goes free', async () => {
-  const f = fixtures('nt-signal', {
-    'a.test.mjs': `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\ntest('a', async () => {\n  appendFileSync(JOURNAL, 'start a\\n');\n  await new Promise((r) => setTimeout(r, 60_000));\n});\n`,
-  });
+  const f = fixtures('nt-signal', { 'a.test.mjs': waits });
   try {
     const env = poolEnv('nt-signal', 1);
     const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
-    expect(await lineIn(f.journal, 'start a')).toBe(true);
+    expect(await pidOf(f.journal, 'file')).toBeGreaterThan(0);
     const next = holder(env);
     process.kill(wrapper.pid, 'SIGHUP');
+    expect(await lineIn(f.journal, 'got SIGHUP', 10_000)).toBe(true);
     // Well short of the test's own minute: only the signal can free the slot this soon.
     expect(await within(next.held, 10_000)).toBe(true);
   } finally {
+    killPids(f.journal);
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
 
 it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test files: the slot one held goes free", async () => {
-  const f = fixtures('nt-group-kill', {
-    'a.test.mjs': `import { test } from 'node:test';\nimport { appendFileSync } from 'node:fs';\ntest('a', async () => {\n  appendFileSync(JOURNAL, 'start a\\n');\n  await new Promise((r) => setTimeout(r, 60_000));\n});\n`,
-  });
+  const f = fixtures('nt-group-kill', { 'a.test.mjs': waits });
   try {
     const env = poolEnv('nt-group-kill', 1);
     const wrapper = start([BIN, '--test', join(f.dir, 'a.test.mjs')], env);
-    expect(await lineIn(f.journal, 'start a')).toBe(true);
+    const pid = await pidOf(f.journal, 'file');
+    expect(pid).toBeGreaterThan(0);
     const next = holder(env);
     // `start` makes the wrapper a group leader: an agent tool's timeout kills its group like this.
     process.kill(-wrapper.pid, 'SIGKILL');
+    expect(await gone(pid)).toBe(true);
     expect(await within(next.held, 10_000)).toBe(true);
   } finally {
+    killPids(f.journal);
     rmSync(f.dir, { recursive: true, force: true });
   }
 });

@@ -47,6 +47,56 @@ export function holder(env: NodeJS.ProcessEnv, mode: 'hold' | 'nest' | 'cluster'
   return { child, held: times(1), times, count: () => count };
 }
 
+/** A zombie is dead: under a PID 1 that reaps nothing (a container), `kill(pid, 0)` still succeeds. */
+export function isAlive(pid: number): boolean {
+  if (!linux) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /, '')[0] !== 'Z';
+  } catch {
+    return false;
+  }
+}
+
+/** Resolves once `pid` is dead, or with false at the cap: a kill is a signal, the exit follows it. */
+export async function gone(pid: number, ms = 3_000): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (isAlive(pid)) {
+    if (Date.now() >= until) return false;
+    await pause(50);
+  }
+  return true;
+}
+
+/** A test's processes write `pid <role> <n>` lines to its journal; resolves with the first of `role`, 0 at the cap. */
+export async function pidOf(journal: string, role: string, ms = 30_000): Promise<number> {
+  const until = Date.now() + ms;
+  for (;;) {
+    const m = existsSync(journal) ? new RegExp(`^pid ${role} (\\d+)$`, 'm').exec(readFileSync(journal, 'utf8')) : null;
+    if (m) return Number(m[1]);
+    if (Date.now() >= until) return 0;
+    await pause(50);
+  }
+}
+
+/** SIGKILL to every pid the journal names: a failed test leaves none of its processes behind. */
+export function killPids(journal: string): void {
+  if (!existsSync(journal)) return;
+  for (const m of readFileSync(journal, 'utf8').matchAll(/^pid \S+ (\d+)$/gm)) {
+    try {
+      process.kill(Number(m[1]), 'SIGKILL');
+    } catch {
+      // Gone already.
+    }
+  }
+}
+
 /** A wait's deadline is a cap: whatever it waits for returns at once. */
 export async function within(p: Promise<unknown>, ms = 30_000): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
