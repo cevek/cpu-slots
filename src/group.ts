@@ -1,18 +1,27 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { constants } from 'node:os';
 import { isatty } from 'node:tty';
 
 /** A process as `/proc` names it: its pid and start time, so a pid reused since is not taken for it. */
 export type Proc = { pid: number; start: string };
 
-/** `cover`: the nested wrapper above it, which passes signals on to it itself while it lives. */
-type Noted = Proc & { cover: Proc | null };
+/** `covered`: under a live nested wrapper, which passes signals on to it itself. */
+type Noted = Proc & { covered: boolean };
 
-type Stat = { comm: string; ppid: number; pgrp: number; tty: number; tpgid: number; start: string };
+type Stat = { state: string; comm: string; ppid: number; pgrp: number; tty: number; tpgid: number; start: string };
 
-// A chroot may have no /proc: then the command alone gets the signals, as on other systems.
-const procfs = process.platform === 'linux' && existsSync('/proc/self/stat');
+// `/proc` of this process's pid namespace, or none: a chroot may have no /proc, a new pid namespace
+// may see its parent's, whose pids are not the ones `kill()` takes here. Without it the command alone
+// gets the signals, as on other systems.
+const procfs = (() => {
+  if (process.platform !== 'linux') return false;
+  try {
+    return readlinkSync('/proc/self') === String(process.pid);
+  } catch {
+    return false;
+  }
+})();
 // Without CONFIG_PROC_CHILDREN the quick walk reads every process's stat instead.
 const childrenFiles = procfs && existsSync(`/proc/self/task/${process.pid}/children`);
 
@@ -22,13 +31,15 @@ function stat(pid: number | 'self'): Stat | null {
     // The name (field 2) may hold spaces and parens; the fields after its last `)` start at the state.
     const end = line.lastIndexOf(')');
     const f = line.slice(end + 2).split(' ');
-    return { comm: line.slice(line.indexOf('(') + 1, end), ppid: Number(f[1]), pgrp: Number(f[2]), tty: Number(f[4]), tpgid: Number(f[5]), start: f[19]! };
+    return { state: f[0]!, comm: line.slice(line.indexOf('(') + 1, end), ppid: Number(f[1]), pgrp: Number(f[2]), tty: Number(f[4]), tpgid: Number(f[5]), start: f[19]! };
   } catch {
     return null;
   }
 }
 
-const live = (p: Proc) => stat(p.pid)?.start === p.start;
+/** Running as noted: a zombie has ended (and a zombie wrapper passes nothing on). */
+const running = (s: Stat | null, start: string) => s !== null && s.start === start && s.state !== 'Z' && s.state !== 'X';
+const live = (p: Proc) => running(stat(p.pid), p.start);
 
 /** The process running under `pid` now (Linux). */
 export function proc(pid: number): Proc | null {
@@ -40,17 +51,15 @@ export function proc(pid: number): Proc | null {
 // `runInGroup` makes of its title, and no program's file name.
 const WRAPPER_COMMS = new Set(['cpu-slots-run: ', 'cpu-slots-node:']);
 
-type Kid = { pid: number; s: Stat };
-
 /**
- * A process's children, each with the stat that names it a child. `exact`: from one read of every
- * process's stat, for the walks signals go by. Else `children` files: cheap, but the kernel may skip
- * a child while a sibling exits during the read.
+ * Who a process's children may be. `exact`: from one read of every process's stat, for the walks
+ * signals go by. Else `children` files: cheap, but the kernel may skip a child while a sibling exits
+ * during the read.
  */
-function childrenLookup(exact: boolean): (pid: number) => Kid[] {
+function childrenLookup(exact: boolean): (pid: number) => Proc[] {
   if (!exact && childrenFiles) {
     return (pid) => {
-      const out: Kid[] = [];
+      const out: Proc[] = [];
       let tasks: string[] = [];
       try {
         tasks = readdirSync(`/proc/${pid}/task`);
@@ -66,26 +75,29 @@ function childrenLookup(exact: boolean): (pid: number) => Kid[] {
         }
         for (const c of list ? list.split(' ') : []) {
           const s = stat(Number(c));
-          // The pid may be another process's by now: its own stat names its parent.
-          if (s && s.ppid === pid) out.push({ pid: Number(c), s });
+          if (s) out.push({ pid: Number(c), start: s.start });
         }
       }
       return out;
     };
   }
-  const map = new Map<number, Kid[]>();
+  const map = new Map<number, Proc[]>();
   for (const name of readdirSync('/proc')) {
     if (!/^\d+$/.test(name)) continue;
     const s = stat(Number(name));
     if (!s) continue;
     const list = map.get(s.ppid);
-    if (list) list.push({ pid: Number(name), s });
-    else map.set(s.ppid, [{ pid: Number(name), s }]);
+    if (list) list.push({ pid: Number(name), start: s.start });
+    else map.set(s.ppid, [{ pid: Number(name), start: s.start }]);
   }
   return (pid) => map.get(pid) ?? [];
 }
 
-/** Each of `roots` still running as noted, and every process under them, now (Linux). */
+/**
+ * Each of `roots` still running as noted, and every process under them, now (Linux). The first root
+ * is the command; any other reached as a root, not under it, has left it (its parent gone): no nested
+ * wrapper is sure to know it, so it is not covered and this one passes signals on to it itself.
+ */
 function tree(roots: Noted[], exact: boolean): Noted[] {
   const children = childrenLookup(exact);
   const out: Noted[] = [];
@@ -94,15 +106,17 @@ function tree(roots: Noted[], exact: boolean): Noted[] {
     if (seen.has(p.pid)) return;
     seen.add(p.pid);
     out.push(p);
-    const cover = WRAPPER_COMMS.has(s.comm) ? { pid: p.pid, start: p.start } : p.cover;
-    const kids = children(p.pid);
-    // Gone and its pid reused before the children were read: they are another process's.
-    if (!live(p)) return;
-    for (const k of kids) visit({ pid: k.pid, start: k.s.start, cover }, k.s);
+    const covered = p.covered || WRAPPER_COMMS.has(s.comm);
+    for (const k of children(p.pid)) {
+      // An edge counts only as it is now: the child, read again, is the one listed and names this
+      // parent, and this parent is still the one noted (a pid reused under either breaks it).
+      const c = stat(k.pid);
+      if (c && running(c, k.start) && c.ppid === p.pid && live(p)) visit({ pid: k.pid, start: k.start, covered }, c);
+    }
   };
   for (const r of roots) {
     const s = stat(r.pid);
-    if (s?.start === r.start) visit(r, s);
+    if (running(s, r.start)) visit({ ...r, covered: false }, s!);
   }
   return out;
 }
@@ -124,7 +138,17 @@ export function signalLive(procs: Iterable<Proc>, sig: NodeJS.Signals): number[]
 
 // `CPU_SLOTS_TRACE=<file>`: a line per note of the tree and per signal passed on, for tests and for
 // seeing what a wrapper did.
-const traceFile = process.env['CPU_SLOTS_TRACE'];
+// A regular file or none: opening a FIFO with no reader would block the wrapper mid-cancel.
+const traceFile = (() => {
+  const path = process.env['CPU_SLOTS_TRACE'];
+  if (!path) return undefined;
+  try {
+    const st = statSync(path, { throwIfNoEntry: false });
+    return !st || st.isFile() ? path : undefined;
+  } catch {
+    return undefined;
+  }
+})();
 function trace(line: string): void {
   if (!traceFile) return;
   try {
@@ -149,8 +173,9 @@ function foreground(): boolean {
  * SIGTERM, SIGHUP and SIGINT to this process go to the command's whole tree (Linux with /proc; else
  * to the command alone): the command alone may exit on it and leave its children running — holding
  * their slots. Below a live nested wrapper they go to that wrapper alone, which passes them on: one
- * delivery each. SIGINT is not passed on in the terminal's foreground group: Ctrl-C has reached every
- * process of it, and a second one is a forced exit with no cleanup to vitest and npm.
+ * delivery each. A process that has left the tree (its parent gone) gets them from this wrapper
+ * itself, and from a nested one that noted it too: twice, rather than none. SIGINT is not passed on
+ * in the terminal's foreground group: Ctrl-C has reached every process of it, and a second one is a forced exit with no cleanup to vitest and npm.
  *
  * The tree is noted every second, and every 100 ms from the first signal on (what a signal handler
  * forks is in it). If this process got a signal or the command died of one, what of the tree still
@@ -166,11 +191,11 @@ export function runInGroup(command: string, args: string[], env: NodeJS.ProcessE
   const child = spawn(command, args, { stdio: 'inherit', env });
   let noted: Noted[] = [];
   let signalled = false;
-  const running = () => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+  const commandRunning = () => child.pid !== undefined && child.exitCode === null && child.signalCode === null;
   const note = (exact: boolean) => {
-    const top = running() ? proc(child.pid!) : null;
+    const top = commandRunning() ? proc(child.pid!) : null;
     try {
-      noted = tree([...(top ? [{ ...top, cover: null }] : []), ...noted], exact);
+      noted = tree([...(top ? [{ ...top, covered: false }] : []), ...noted], exact);
     } catch {
       // /proc unreadable now: what was noted stays.
     }
@@ -191,15 +216,23 @@ export function runInGroup(command: string, args: string[], env: NodeJS.ProcessE
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(sig, () => {
       const sent: number[] = [];
-      if (running()) {
+      if (commandRunning()) {
         const pass = sig !== 'SIGINT' || !foreground();
         if (!procfs) {
-          if (pass && child.kill(sig)) sent.push(child.pid!);
+          // Not `child.kill`: a failure there (EPERM) is an `error` event, taken for a failed spawn.
+          try {
+            if (pass) {
+              process.kill(child.pid!, sig);
+              sent.push(child.pid!);
+            }
+          } catch {
+            // Gone or not ours to signal any more.
+          }
         } else {
           signalled = true;
           note(true);
           schedule();
-          if (pass) sent.push(...signalLive(noted.filter((p) => !p.cover || !live(p.cover)), sig));
+          if (pass) sent.push(...signalLive(noted.filter((p) => !p.covered), sig));
         }
       }
       trace(`${sig} sent ${sent.join(',')}`);

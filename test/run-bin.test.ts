@@ -153,6 +153,28 @@ it.runIf(linux)('what the command forks in its SIGTERM handler goes with it: the
   }
 });
 
+it.runIf(linux)('after a signal the wrapper notes the tree every 100 ms, not every second', async () => {
+  const s = scratch('run-rescan-rate');
+  const trace = join(s.dir, 'trace');
+  try {
+    const cmd = start([RUN, '--', process.execPath, '-e', `${sayTo(s.journal)} process.on('SIGTERM', () => {}); say('pid command ' + process.pid); setInterval(() => {}, 1000);`], poolEnv('run-rescan-rate', 2, { CPU_SLOTS_TRACE: trace }));
+    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
+    process.kill(cmd.pid, 'SIGTERM');
+    const after = () => {
+      const lines = traceOf(trace).filter((t) => t.wrapper === cmd.pid);
+      return lines.slice(lines.findIndex((t) => t.what === 'SIGTERM sent') + 1).filter((t) => t.what === 'noted').length;
+    };
+    const t0 = Date.now();
+    expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'SIGTERM sent')).toBe(true);
+    while (after() < 3 && Date.now() - t0 < 5_000) await pause(20);
+    // Three notes: 300 ms at 100 ms each, 3 s at one a second; the cap leaves a loaded machine room.
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  } finally {
+    killPids(s.journal);
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
 it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to the wrapper cannot be passed on", async () => {
   const s = scratch('run-group-kill');
   try {
@@ -168,14 +190,15 @@ it.runIf(linux)("a kill of the caller's group takes the command: a SIGKILL to th
   }
 });
 
-// Says each `sig` it gets; on SIGUSR2 says `probe` and exits. Standard signals pending together are
-// delivered lowest number first: once `probe` is said, every `sig` sent before it has been said too.
+// Says each `sig` it gets; on SIGWINCH (28, above SIGINT and SIGTERM) says `probe` and exits.
+// Standard signals pending together are delivered lowest number first: once `probe` is said, every
+// `sig` sent before the probe has been said too.
 const counts = (journal: string, sig: string) =>
-  `${sayTo(journal)} process.on('${sig}', () => say('${sig}')); process.on('SIGUSR2', () => { say('probe'); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
+  `${sayTo(journal)} process.on('${sig}', () => say('${sig}')); process.on('SIGWINCH', () => { say('probe'); process.exit(0); }); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
 
 /** Sends the probe and waits for the command to end on it. */
 async function probe(pid: number, done: Promise<{ code: number | null }>): Promise<number | null> {
-  process.kill(pid, 'SIGUSR2');
+  process.kill(pid, 'SIGWINCH');
   return (await done).code;
 }
 
@@ -189,6 +212,7 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
       expect(pid).toBeGreaterThan(0);
       process.kill(cmd.pid, sig);
       expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === `${sig} sent`)).toBe(true);
+      expect(await lineIn(s.journal, sig, 10_000)).toBe(true);
       expect(await probe(pid, cmd.done)).toBe(0);
       expect(sends(trace, sig, pid)).toBe(1);
       expect(count(s.journal, sig)).toBe(1);
@@ -210,6 +234,7 @@ it.runIf(linux)('a SIGINT to the outer of two nested wrappers is sent to the com
     // Both wrappers have passed it on: the outer one, and the inner one it went to.
     expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'SIGINT sent')).toBe(true);
     expect(await traced(trace, (t) => t.wrapper !== cmd.pid && t.what === 'SIGINT sent')).toBe(true);
+    expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
     expect(await probe(pid, cmd.done)).toBe(0);
     expect(sends(trace, 'SIGINT', pid)).toBe(1);
     expect(count(s.journal, 'SIGINT')).toBe(1);
@@ -224,8 +249,9 @@ it.runIf(linux)('below a nested wrapper killed alone, the outer one passes signa
   const trace = join(s.dir, 'trace');
   try {
     const inner = `${sayTo(s.journal)} say('pid inner ' + process.ppid); say('pid command ' + process.pid); setInterval(() => {}, 1000);`;
-    // sh stays the outer one's command after the inner wrapper is gone.
-    const cmd = start([RUN, '--', '/bin/sh', '-c', `"$0" "$1" -- "$2" -e "$3"; sleep 1000`, process.execPath, RUN, process.execPath, inner], poolEnv('run-dead-inner', 2, { CPU_SLOTS_TRACE: trace }));
+    // The inner wrapper goes to the background and sh becomes `sleep`, which reaps nothing: killed, the
+    // inner wrapper stays a zombie, its pid and start time still there.
+    const cmd = start([RUN, '--', '/bin/sh', '-c', `"$0" "$1" -- "$2" -e "$3" < /dev/null & exec sleep 1000`, process.execPath, RUN, process.execPath, inner], poolEnv('run-dead-inner', 2, { CPU_SLOTS_TRACE: trace }));
     const wrapper = await pidOf(s.journal, 'inner');
     const pid = await pidOf(s.journal, 'command');
     expect(wrapper * pid).toBeGreaterThan(0);
@@ -233,6 +259,7 @@ it.runIf(linux)('below a nested wrapper killed alone, the outer one passes signa
     expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'noted' && t.pids.includes(pid) && t.pids.includes(wrapper))).toBe(true);
     process.kill(wrapper, 'SIGKILL');
     expect(await gone(wrapper)).toBe(true);
+    expect(readFileSync(`/proc/${wrapper}/stat`, 'utf8').replace(/^.*\) /, '')[0]).toBe('Z');
     process.kill(cmd.pid, 'SIGTERM');
     expect(await traced(trace, (t) => t.wrapper === cmd.pid && t.what === 'SIGTERM sent')).toBe(true);
     expect(sends(trace, 'SIGTERM', pid)).toBe(1);
@@ -288,7 +315,7 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
     process.kill(wrapper, 'SIGINT');
     expect(await traced(trace, (t) => t.wrapper === wrapper && t.what === 'SIGINT sent')).toBe(true);
-    process.kill(pid, 'SIGUSR2');
+    process.kill(pid, 'SIGWINCH');
     expect(await gone(pid)).toBe(true);
     expect(sends(trace, 'SIGINT', pid)).toBe(0);
     expect(count(s.journal, 'SIGINT')).toBe(1);

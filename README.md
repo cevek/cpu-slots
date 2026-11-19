@@ -80,7 +80,8 @@ in that group.
 
 - **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command's whole tree (on Linux with `/proc`;
   elsewhere to the command alone, and nothing below is noted or killed). Below a live nested wrapper
-  they go to that wrapper alone, and it passes them on: one delivery each. Sent to the whole group (outside a terminal's
+  they go to that wrapper alone, and it passes them on: one delivery each (a process orphaned there
+  may get them from both). Sent to the whole group (outside a terminal's
   foreground for SIGINT), they reach a process twice.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a

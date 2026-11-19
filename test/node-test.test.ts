@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { gone, hasLine, holder, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
+import { ABSENT_MS, gone, hasLine, pause, holder, killAll, killPids, lineIn, linux, oneAtATime, pidOf, poolEnv, repo, run, start, within } from './support/procs.ts';
 
 
 afterEach(killAll);
@@ -109,6 +109,9 @@ it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test file
     const pid = await pidOf(f.journal, 'file');
     expect(pid).toBeGreaterThan(0);
     const next = holder(env);
+    // The file holds the pool's one slot: only its end frees it.
+    await pause(ABSENT_MS);
+    expect(next.count()).toBe(0);
     // `start` makes the wrapper a group leader: an agent tool's timeout kills its group like this.
     process.kill(-wrapper.pid, 'SIGKILL');
     expect(await gone(pid)).toBe(true);
