@@ -99,9 +99,14 @@ it('a SIGTERM to the wrapper reaches the command', async () => {
 it('a SIGINT to the wrapper alone, with no terminal, reaches the command once', async () => {
   const s = scratch('run-sigint');
   try {
-    const cmd = start([RUN, '--', process.execPath, '-e', COUNTS(s.journal)], poolEnv('run-sigint', 0));
-    expect(await pidOf(s.journal, 'command')).toBeGreaterThan(0);
+    const spied = join(s.dir, 'spy');
+    const cmd = start(['--import', SPY, RUN, '--', process.execPath, '-e', COUNTS(s.journal)], poolEnv('run-sigint', 0, { KILL_SPY: spied }));
+    const pid = await pidOf(s.journal, 'command');
+    expect(pid).toBeGreaterThan(0);
     process.kill(cmd.pid, 'SIGINT');
+    expect(await lineIn(spied, 'SIGINT handled 2', 10_000)).toBe(true);
+    // Sent once: two sends pending at once would reach the command as one.
+    expect(readFileSync(spied, 'utf8').split('\n').filter((l) => l === `kill ${pid} SIGINT`)).toHaveLength(1);
     expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
     process.kill(cmd.pid, 'SIGTERM');
     expect((await cmd.done).code).toBe(0);
@@ -137,7 +142,7 @@ it.runIf(hasScript)("Ctrl-C in the terminal's foreground group reaches the comma
     expect(await lineIn(s.journal, 'SIGINT', 10_000)).toBe(true);
     process.kill(wrapper, 'SIGINT');
     // The wrapper's handlers have run; what they sent is in the spy's journal before this line.
-    expect(await lineIn(spied, 'SIGINT handled', 10_000)).toBe(true);
+    expect(await lineIn(spied, 'SIGINT handled 2', 10_000)).toBe(true);
     expect(readFileSync(spied, 'utf8').split('\n')).not.toContain(`kill ${pid} SIGINT`);
     process.kill(wrapper, 'SIGTERM');
     expect(await gone(pid)).toBe(true);

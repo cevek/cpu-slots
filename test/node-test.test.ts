@@ -132,7 +132,10 @@ it.runIf(linux)("a kill of the caller's group takes `cpu-slots-node`'s test file
     // `start` makes the wrapper a group leader: an agent tool's timeout kills its group like this.
     process.kill(-wrapper.pid, 'SIGKILL');
     expect(await gone(pid)).toBe(true);
-    expect(await within(holder(env).held, 10_000)).toBe(true);
+    // Free now, to this process: the pool is on, and the file's death let its slot go.
+    const freed = await tryAcquireSlot(env);
+    freed?.release();
+    expect(freed).not.toBeNull();
   } finally {
     killPids(f.journal);
     rmSync(f.dir, { recursive: true, force: true });

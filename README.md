@@ -81,13 +81,15 @@ its slots are held until it ends.
   alone cannot be passed on and leaves the command running: it is in the caller's group, and the kill
   of that group takes it.
 - **SIGTERM, SIGHUP, SIGINT** to the wrapper go to the command alone; what becomes of its children is
-  the command's, as with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to `node --test` as SIGTERM:
-  the runner ends its test files on SIGTERM, but dies of a SIGHUP and leaves them running. Sent to the
+  the command's, as with `npm` or `sh`. `cpu-slots-node` hands a SIGHUP to its command as SIGTERM —
+  to any, not only `node --test`, the reason for it: the runner ends its test files on SIGTERM, but
+  dies of a SIGHUP and leaves them running. Sent to the
   whole group, a signal may reach the command twice: from the sender, and from the wrapper unless the
   command has exited by then.
 - **SIGINT** is not passed on while the wrapper is in its terminal's foreground group (elsewhere than
   Linux: while its stdin is a terminal): Ctrl-C has reached every process of it, and a second one is a
-  forced exit with no cleanup to vitest and npm.
+  forced exit with no cleanup to vitest and npm. A Ctrl-C that comes while the wrapper is starting
+  the command, before it runs, reaches neither.
 - **Limits**: a command that ignores the signal keeps the wrapper and its slots until it exits. What a
   command leaves running when it exits — on its own or on a signal — runs on.
 
