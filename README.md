@@ -61,17 +61,22 @@ try {
 run, with a width:
 
 ```sh
-cpu-slots-run --max 4 -- eslint . --concurrency {slots}
-cpu-slots-run --max 4 -- env GOMAXPROCS={slots} tsgo
+cpu-slots-run --max 4 -- eslint . --concurrency @slots@
+cpu-slots-run --max 4 -- env GOMAXPROCS=@slots@ tsgo
 cpu-slots-run -- eslint src test        # single-threaded: one slot
 ```
 
 `cpu-slots-run` waits for one slot, takes the free ones up to `--max` (default 1) without waiting, and
-hands their number to the command: every `{slots}` in its arguments, and `CPU_SLOTS_WIDTH`. The width is
-fixed at the start — one that started on a busy machine stays narrow. The command runs in a process
-group of its own, a signal to the wrapper reaches the whole group, its exit code passes through, and its
-slots are held until it ends; what it leaves running in its group goes with it. The group is a session
-of its own, with no terminal: not for commands that prompt.
+hands their number to the command: every `@slots@` in its arguments, and `CPU_SLOTS_WIDTH`. The token is
+`@slots@`, not `{slots}`: zsh and bash read `{word}>file` as a redirection to a named descriptor, and the
+argument would be gone before the wrapper sees it. The width is fixed at the start — one that started
+on a busy machine stays narrow.
+
+The command runs in a process group of its own, a signal to the wrapper reaches the whole group, its
+exit code passes through, and its slots are held until it ends; what it leaves running in its group
+goes with it. The group is a session of its own, with no terminal: not for commands that prompt.
+Inside another holder's tree (a wrapper under a wrapper) the command stays in the outer one's group,
+so cancelling the outer one takes it too.
 
 - **Width without a slot**: inside an ancestor's slot of the pool it takes none and the width is 1 (the
   ancestor holds one slot for its whole tree); with no pool (not Linux, `CPU_SLOTS=0`) or past the

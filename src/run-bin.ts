@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // `cpu-slots-run [--max N] [--] <command> [args…]`: a heavy command with no test file to wait for
 // (ESLint, tsgo, a build) runs in slots for its whole run. It waits for one, takes the free ones up
-// to N without waiting, and hands their number to the command: every `{slots}` in its arguments and
-// `CPU_SLOTS_WIDTH`. The width is fixed at the start, so one that started on a busy machine stays
-// narrow. Inside an ancestor's slot of the pool it takes none and the width is 1: that ancestor holds
-// one slot for its whole tree. With no pool (not Linux, `CPU_SLOTS=0`, broken) or past the wait's
-// ceiling it takes none, and the width is N — unbounded by the pool, as the command was without it.
+// to N without waiting, and hands their number to the command: every `@slots@` in its arguments and
+// `CPU_SLOTS_WIDTH`. `@slots@`, not `{slots}`: zsh and bash read `{word}>file` as a redirection to a
+// named descriptor, and the argument is gone before this process sees it. The width is fixed at the
+// start, so one that started on a busy machine stays narrow. Inside an ancestor's slot of the pool it
+// takes none and the width is 1: that ancestor holds one slot for its whole tree. With no pool (not
+// Linux, `CPU_SLOTS=0`, broken) or past the wait's ceiling it takes none, and the width is N —
+// unbounded by the pool, as the command was without it.
 import { runInGroup } from './group.js';
 import { acquireSlot, pool, tryAcquireSlot, type Slot } from './index.js';
 
@@ -55,7 +57,7 @@ while (taken && held.length < max) {
 const width = taken ? held.length : nested ? 1 : max;
 runInGroup(
   command,
-  rest.map((a) => a.replaceAll('{slots}', String(width))),
+  rest.map((a) => a.replaceAll('@slots@', String(width))),
   { ...process.env, ...first.env, CPU_SLOTS_WIDTH: String(width) },
   'cpu-slots-run',
 );

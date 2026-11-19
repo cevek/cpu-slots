@@ -9,7 +9,19 @@ import { constants } from 'node:os';
  * run on outside them. The group is a session of its own, with no controlling terminal: no prompts.
  */
 export function runInGroup(command: string, args: string[], env: NodeJS.ProcessEnv, name: string): void {
-  const child = spawn(command, args, { stdio: 'inherit', detached: true, env });
+  // Inside a holder's tree (its mark in the env) the command stays in that holder's group: a group of
+  // its own would outlive the holder's kill of its group, and run on with the holder's slot gone.
+  const own = (process.env['CPU_SLOTS_HELD'] ?? '') === '';
+  const child = spawn(command, args, { stdio: 'inherit', detached: own, env });
+  if (!own) {
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => child.kill(sig));
+    child.on('error', (err) => {
+      process.stderr.write(`${name}: ${err.message}\n`);
+      process.exit(127);
+    });
+    child.on('exit', (code, signal) => process.exit(signal ? 128 + (constants.signals[signal] ?? 0) : (code ?? 1)));
+    return;
+  }
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(sig, () => {
       try {
